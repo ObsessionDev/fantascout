@@ -36,6 +36,7 @@ const paths = {
   back: "M15 19 8 12l7-7",
   forward: "M9 5l7 7-7 7",
   more: "M5 12h.01M12 12h.01M19 12h.01",
+  download: "M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M4.5 19.5h15",
 };
 
 export function Icon({ name, ...rest }) {
