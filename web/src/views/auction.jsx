@@ -25,6 +25,11 @@ import {
 import { useAuctionBoard } from "../use-auction-store.js";
 import { useAdvisor } from "../use-advisor.js";
 import {
+  buildRosterExport,
+  downloadRosterExport,
+  rosterExportFilename,
+} from "../roster-export.js";
+import {
   AdviceDetail,
   BidGauge,
   PriceStepper,
@@ -257,6 +262,15 @@ export default function AuctionView({
     report(writeUserTeamIndex(activeProfileId, index));
   };
 
+  const exportMyRoster = () => {
+    const payload = buildRosterExport({
+      profileId: activeProfileId,
+      team: myTeam,
+      assigned: board.assigned,
+    });
+    downloadRosterExport(payload, rosterExportFilename(myTeam));
+  };
+
   const lastTransaction = board.history.at(-1);
   const lastPlayer = lastTransaction
     ? data.players.find(
@@ -285,6 +299,7 @@ export default function AuctionView({
             teams={board.teams}
             userTeamIndex={userTeamIndex}
             onChangeUserTeam={chooseUserTeam}
+            onExportRoster={exportMyRoster}
           />
 
           <div className="nominate">
@@ -477,6 +492,7 @@ function MyTeamBar({
   teams,
   userTeamIndex,
   onChangeUserTeam,
+  onExportRoster,
 }) {
   return (
     <div className="myteam">
@@ -527,6 +543,15 @@ function MyTeamBar({
           </span>
         ))}
       </div>
+      <button
+        type="button"
+        className="btn btn--ghost btn--sm"
+        onClick={onExportRoster}
+        disabled={!rosterSize}
+        title="Scarica la rosa acquistata come file JSON, da passare ad advisor.lineup"
+      >
+        <Icon name="download" /> Esporta la mia rosa
+      </button>
     </div>
   );
 }

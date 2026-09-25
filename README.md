@@ -147,6 +147,68 @@ Nothing is precomputed and nothing goes stale: pricing the single player just
 called is far cheaper than pricing a whole role in advance.
 `docs/ARCHITETTURA_ASTA.md` has the measurements behind that choice.
 
+## Matchday Lineup (fork)
+
+The auction is one event; the season is thirty-six matchdays, and `advisor.lineup`
+answers the question asked every one of them: who to field, given the roster the
+auction produced. It reuses the auction's own model — `optimize.best_lineup`,
+which is `optimize.lineup_value` with the winning selection kept instead of
+discarded — restricted to a single matchday's own numbers instead of the
+season means.
+
+**Exporting the roster.** The live auction is the only place the purchased
+roster exists, in the browser's own storage (`web/src/auction-store.js`). The
+dashboard's auction screen has an **Esporta la mia rosa** button next to the
+team panel that downloads it as `fantascout-rosa-<squadra>-<data>.json`:
+
+```json
+{
+  "version": 1,
+  "profilo": "lega-2026-27",
+  "squadra": "La mia squadra",
+  "esportato_il": "2026-09-26T10:00:00.000Z",
+  "giocatori": [
+    { "id": 5585, "nome": "Nome Cognome", "ruolo": "A", "squadra": "Club", "prezzo": 55 }
+  ]
+}
+```
+
+Only `id` is load-bearing: `advisor.lineup` re-resolves every player against
+the generated dataset to read his per-matchday projections, and refuses the
+file if an id is missing from it. `nome`, `ruolo`, `squadra` and `prezzo` are
+carried along for a human reading the file, not consumed back.
+
+**The command:**
+
+```bash
+.venv/bin/python -m advisor.lineup \
+  --data data/processed/lega-2026-27/2026-27/auction_data.json \
+  --profile config/profiles/lega-2026-27.json \
+  --roster ~/Downloads/fantascout-rosa-la-mia-squadra-2026-09-26.json \
+  --giornata 5 \
+  --indisponibili "Nome Infortunato,#5585" \
+  --dubbi "Nome In Ballottaggio:0.6" \
+  --json
+```
+
+`--giornata` is the Serie A matchday, 1-based. `--indisponibili` drops players
+from consideration entirely (injuries, suspensions); `--dubbi` overrides a
+player's probability of playing for that matchday only, everything else about
+him unchanged — both accept `"Nome"` or `"#id"`, resolved the same way as the
+auction's own `--owned`/`--taken`. Output is readable text by default, or JSON
+with `--json` for a caller like Mike. A roster that cannot fill any allowed
+formation (no fit goalkeeper, or too many unavailable in one department) is
+reported as an error naming the shortfall, never as a silently degraded XI.
+
+**Availability data.** Today `--indisponibili`/`--dubbi` are typed in by hand.
+Reading probable lineups, injuries and suspensions from sports sites
+automatically is a later phase (`docs/VISIONE.md`) and is deliberately not
+built yet: each candidate site's terms of use need reading first, since an
+automated fetch is a very different thing from Mattia reading the same page
+himself. Until then, availability reaches `advisor.lineup` as CLI flags built
+from whatever Mattia (or Mike, told by Mattia) read that day — no scraping, no
+stored credentials, no site-specific parser.
+
 ## Verification
 
 ```bash

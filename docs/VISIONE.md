@@ -7,23 +7,24 @@ abbiamo già.
 L'asta è un evento, la stagione è trentasei. Tutto quello che segue vale più
 dell'asta in termini di punti, e ha molto più tempo per essere fatto bene.
 
-## 1. Formazione di ogni giornata
+## 1. Formazione di ogni giornata — in corso
 
 **La domanda:** chi schierare questa giornata, dati i miei venticinque.
 
-È la funzione più usata di tutte — trentasei volte, contro una — ed è anche la
-più vicina a essere già pronta. Il dataset porta già gli array per giornata
-(`p_gioca_per_giornata`, `voto_puro_mean_per_giornata`,
-`bonus_atteso_per_giornata`, `venue_per_giornata`), e `optimize.lineup_value`
-già sceglie l'undici migliore fra le formazioni ammesse tenendo conto della
-copertura panchina e del cap sui cambi. Scegliere la formazione di *una*
-giornata è quella funzione ristretta a un solo indice.
+È la funzione più usata di tutte — trentasei volte, contro una. `optimize.best_lineup`
+(estratto da `optimize.lineup_value`, che ora tiene la formazione scelta invece
+di scartarla) sceglie l'undici migliore fra le formazioni ammesse tenendo conto
+della copertura panchina e del cap sui cambi. `advisor.lineup` lo applica a una
+sola giornata: dati una rosa, una giornata e le indisponibilità, restituisce
+l'undici, la panchina in ordine e le note (`README.md`, sezione "Matchday
+Lineup"). L'esportazione della rosa dalla dashboard (fase 1 della proposta) è
+il pulsante **Esporta la mia rosa** nella schermata asta.
 
-**Cosa manca davvero:** la disponibilità reale vicino alla scadenza —
-infortuni, squalifiche, probabili formazioni. Il modello oggi conosce solo un
-prior di titolarità fissato a inizio stagione. Senza quel dato la funzione dice
-cose ragionevoli ma cieche, e schierare un infortunato costa più di ogni
-raffinatezza del modello.
+**Cosa manca ancora:** la disponibilità vicino alla scadenza è oggi scritta a
+mano (`--indisponibili`, `--dubbi`); leggerla dalle probabili formazioni dei
+siti sportivi è la fase 3, non ancora costruita — prima vanno letti i termini
+d'uso dei siti candidati. Manca anche il flusso su Telegram (fase 4: `/formazione`
+o pianificato) e la varianza contro l'avversario, discussa sotto.
 
 **Nota sulla varianza:** a differenza dell'asta, qui il criterio giusto non è
 sempre la media. Contro un avversario più forte conviene alzare la varianza,
