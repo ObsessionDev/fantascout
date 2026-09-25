@@ -810,6 +810,7 @@ function App() {
               profileId={activeProfileId}
               draft={auctionDraft}
               setDraft={setAuctionDraft}
+              apiBase={apiBase}
             />
           ) : null}
           {view === "updates" ? (

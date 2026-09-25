@@ -586,6 +586,10 @@ export const evaluateAuction = (data = {}) => {
     : null;
   const replacement =
     replacementIndex == null ? null : roleAlternatives[replacementIndex];
+  // Where this player actually sits among the ones still on the board.
+  const candidateRank = roleAlternatives.findIndex(
+    (item) => item?.player?.id === player?.id,
+  );
   const candidateValue = candidateUtility.marginalUtility;
   const defenseMarginalValue =
     candidateUtility.defenseGain - finite(replacement?.evaluation?.defenseGain);
@@ -688,7 +692,12 @@ export const evaluateAuction = (data = {}) => {
   );
   const reasons = [
     replacement
-      ? `${rounded(candidateValue)} punti proiettati; margine di ${rounded(marginalValue)} sul cutoff del ruolo (${replacementIndex + 1}° tra i disponibili).`
+      /* `replacementIndex` marks the cutoff of the role, not this player: it
+         follows the league's remaining demand, so it reads the same for every
+         candidate of that role. Saying "tra i disponibili" made it look like
+         the player's own rank, which is a different and more useful number, so
+         both are now named for what they are. */
+      ? `${rounded(candidateValue)} punti proiettati${candidateRank >= 0 ? `, ${candidateRank + 1}° per valore fra i ${roleAlternatives.length} ${player.ruolo} disponibili` : ""}; margine di ${rounded(marginalValue)} sul ricambio al taglio del ruolo (il ${replacementIndex + 1}°).`
       : `${rounded(candidateValue)} punti proiettati; nessuna alternativa disponibile nel ruolo.`,
     `Margine corretto: ${rounded(individualMarginalValue)} punti individuali + ${rounded(defenseMarginalValue)} punti modificatore difesa.`,
     `Limite ancorato al mercato a ${candidateCost} crediti, corretto per qualità relativa e fattibilità del completamento.`,

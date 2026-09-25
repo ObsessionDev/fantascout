@@ -9,6 +9,8 @@ import {
   reconcileAuctionDraft,
   slotsLeft,
 } from "../auction-state.js";
+import { Ceiling } from "../auction-ceiling.jsx";
+import { useMaximumBid } from "../use-auction-advisor.js";
 import { normalizeRules } from "../league-rules.js";
 import {
   assignPlayer,
@@ -54,6 +56,7 @@ export default function AuctionView({
   profileId,
   draft,
   setDraft,
+  apiBase = "",
 }) {
   const activeRules = normalizeRules(
     rules ?? data.league_rules ?? { startingCredits: 750 },
@@ -126,6 +129,10 @@ export default function AuctionView({
   });
 
   const activeRole = board.activeRole;
+  /* The ceiling is solved on demand rather than precomputed: about a second per
+     player, which is less than it takes to type the name, so there is no batch
+     to keep warm and nothing to go stale. */
+  const ceiling = useMaximumBid(board, activeProfileId, player, { apiBase });
   const myTeam = board.teams[userTeamIndex];
   const mySlots = slotsLeft(myTeam, activeRules);
   const myMax = legalMaxBid(myTeam, activeRules);
@@ -359,6 +366,7 @@ export default function AuctionView({
             <VerdictCard
               player={player}
               advice={advice}
+              ceiling={ceiling}
               price={price}
               rules={activeRules}
               legalMax={selectedLegalMax}
@@ -532,6 +540,7 @@ function MyTeamBar({
 function VerdictCard({
   player,
   advice,
+  ceiling,
   price,
   rules,
   legalMax,
@@ -588,6 +597,8 @@ function VerdictCard({
       </div>
 
       <BidGauge advice={advice} price={price} rules={rules} legalMax={legalMax} />
+
+      <Ceiling state={ceiling} price={price} />
 
       <div className="bidbar">
         <PriceStepper

@@ -334,6 +334,210 @@ def weighted_rate_per_appearance(player_id: int, histories: list[pd.DataFrame], 
     return float(np.average(values, weights=used_weights)) if values else 0.0
 
 
+RATE_COLUMNS = ("Gf", "Ass", "Amm", "Esp", "Au", "Gs")
+
+
+def has_rated_history(player_id: int, histories: list[pd.DataFrame]) -> bool:
+    """True when at least one loaded season records a rated appearance for the player."""
+    for frame in histories:
+        row = frame[frame.Id == player_id]
+        if not row.empty and pd.notna(row.iloc[0].Pv) and float(row.iloc[0].Pv) > 0:
+            return True
+    return False
+
+
+def fit_rate_priors(listone: pd.DataFrame, histories: list[pd.DataFrame], config: "ModelConfig") -> dict:
+    """Per-role event-rate priors as a function of market value.
+
+    A player with no rated history has every per-90 rate equal to zero, and zero
+    is not neutral: the expected bonus is negative for goalkeepers (conceded
+    goals) and positive for midfielders and forwards, so a missing history
+    inflates one end of the listing and deflates the other. The market value is
+    the one signal available for those players, so each rate is regressed on
+    log(1 + FVM) among the players who do have history and evaluated for the
+    ones who do not. Coefficients are fitted at run time from the loaded
+    seasons, never hard-coded.
+
+    Returns {role: {column: (slope, intercept)}}. A degenerate or undersized
+    group collapses to a flat prior at the role median.
+    """
+    priors: dict[str, dict[str, tuple[float, float]]] = {}
+    for role, group in listone.groupby("R"):
+        observed = [(float(row.FVM), int(row.Id)) for row in group.itertuples()
+                    if has_rated_history(int(row.Id), histories)]
+        priors[role] = {}
+        for column in RATE_COLUMNS:
+            rates = [weighted_rate_per_appearance(player_id, histories, column, config.history_weights)
+                     for _, player_id in observed]
+            if not rates:
+                priors[role][column] = (0.0, 0.0)
+                continue
+            median = float(np.median(rates))
+            x = np.log1p(np.array([fvm for fvm, _ in observed], dtype=float))
+            y = np.array(rates, dtype=float)
+            if len(rates) < config.rate_prior_min_samples or float(np.ptp(x)) == 0 or float(np.ptp(y)) == 0:
+                priors[role][column] = (0.0, median)
+                continue
+            slope, intercept = np.linalg.lstsq(np.vstack([x, np.ones(len(x))]).T, y, rcond=None)[0]
+            priors[role][column] = (float(slope), float(intercept))
+    return priors
+
+
+def imputed_rate(priors: dict, role: str, column: str, fvm: float) -> float:
+    """Evaluate the fitted prior; rates are counts per 90 and cannot be negative."""
+    slope, intercept = priors.get(role, {}).get(column, (0.0, 0.0))
+    return float(max(0.0, slope * np.log1p(max(0.0, fvm)) + intercept))
+
+
+def _or_none(value: object) -> object:
+    """A blank cell is an absent value, never NaN.
+
+    pandas returns NaN for a missing entry even when the column itself stores
+    None, and NaN is not valid JSON, so every optional cell read out of a frame
+    passes through here.
+    """
+    return None if value is None or (isinstance(value, float) and value != value) else value
+
+
+def _describe_non_finite(value: object, path: str) -> str | None:
+    """First NaN or infinity in a nested structure, as a readable path.
+
+    `json.dump` refuses these, and rightly so: a NaN that reached the dataset is
+    a missing input somewhere upstream, not a number. Its message names neither
+    the field nor the row, though, which leaves the reader to guess across five
+    hundred players, so the payload is walked first and the culprit named.
+    """
+    if isinstance(value, float):
+        return path if (value != value or value in (float("inf"), float("-inf"))) else None
+    if isinstance(value, dict):
+        for key, item in value.items():
+            found = _describe_non_finite(item, f"{path}.{key}")
+            if found:
+                return found
+        return None
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            found = _describe_non_finite(item, f"{path}[{index}]")
+            if found:
+                return found
+    return None
+
+
+def _reject_non_finite(players: list[dict], label: str) -> None:
+    for index, player in enumerate(players):
+        path = _describe_non_finite(player, f"{label}[{index}]")
+        if path:
+            field = path.split("]", 1)[1].lstrip(".") or "?"
+            raise ValueError(
+                f"Valore non numerico (NaN) in {field} per {player.get('nome', '?')} "
+                f"({player.get('ruolo', '?')}, {player.get('squadra', '?')}, id {player.get('id', '?')}). "
+                "Di solito significa un dato di input mancante per quel giocatore: "
+                "controlla listone, statistiche e squadre.csv per quella riga."
+            )
+
+
+def matchday_expectations(player: dict, matchdays: range | list[int]) -> tuple[float, float, float]:
+    """Fixture-aware means over the configured league window.
+
+    Returns (points, fantavoto, probability). The three are kept separate on
+    purpose: `points` is the screening measure for a listing and charges a
+    player for the games he misses, but a missed game is covered by the bench,
+    so a roster must be valued from `fantavoto` and `probability` instead.
+    """
+    play = player["p_gioca_per_giornata"]
+    vote = player["voto_puro_mean_per_giornata"]
+    bonus = player["bonus_atteso_per_giornata"]
+    days = [day for day in matchdays if day < len(play)]
+    if not days:
+        projection = player["proiezione"]
+        return (float(projection["p_gioca"] * projection["fantavoto"]),
+                float(projection["fantavoto"]), float(projection["p_gioca"]))
+    fantavoto = [vote[day] + bonus[day] for day in days]
+    probability = [play[day] for day in days]
+    points = [p * f for p, f in zip(probability, fantavoto)]
+    return float(np.mean(points)), float(np.mean(fantavoto)), float(np.mean(probability))
+
+
+def market_price_expectations(players: list[dict], league: LeagueConfig) -> None:
+    """Convert the source FVM into the credits this league will actually pay.
+
+    FVM is published on its own scale and upstream rescales it by a fixed
+    factor, which does not survive a change of starting credits. The market
+    instead has to place exactly `participants * roster_size` players and spend
+    exactly `participants * starting_credits` doing it, at no less than the
+    minimum bid each. Those two identities pin the scale with no free parameter:
+    every player is worth the minimum bid plus a share of what is left over,
+    proportional to his FVM. The players who set the scale are the ones the
+    market will actually buy, taken per role because the roster fixes how many
+    of each are needed.
+
+    Writes `prezzo_atteso` on every player, in credits.
+    """
+    bought: list[dict] = []
+    for role, slots in league.slots:
+        in_role = sorted((p for p in players if p["ruolo"] == role), key=lambda p: -p["fvm_original"])
+        bought.extend(in_role[:league.participants * slots])
+    floor_spend = len(bought) * league.minimum_bid
+    total_fvm = sum(p["fvm_original"] for p in bought)
+    discretionary = max(0.0, league.credit_pool - floor_spend)
+    scale = discretionary / total_fvm if total_fvm > 0 else 0.0
+    for player in players:
+        player["prezzo_atteso"] = round(league.minimum_bid + scale * player["fvm_original"], 1)
+
+
+def market_value_curve(players: list[dict], league: LeagueConfig, config: "ModelConfig") -> dict:
+    """Per-role fit of expected points against log price, over the players the market will buy.
+
+    The curve answers "what do the other seven managers get for this money?".
+    A player above his own role curve is cheap for what he produces. Fitted at
+    run time, so a change of credits, scoring or roster reshapes it.
+    """
+    curve: dict[str, tuple[float, float]] = {}
+    for role, slots in league.slots:
+        in_role = sorted((p for p in players if p["ruolo"] == role), key=lambda p: -p["fvm_original"])
+        sample = in_role[:league.participants * slots]
+        if len(sample) < config.rate_prior_min_samples:
+            curve[role] = (0.0, float(np.mean([p["_epm"] for p in sample])) if sample else 0.0)
+            continue
+        x = np.log(np.array([p["prezzo_atteso"] for p in sample], dtype=float))
+        y = np.array([p["_epm"] for p in sample], dtype=float)
+        if float(np.ptp(x)) == 0:
+            curve[role] = (0.0, float(np.mean(y)))
+            continue
+        slope, intercept = np.linalg.lstsq(np.vstack([x, np.ones(len(x))]).T, y, rcond=None)[0]
+        curve[role] = (float(slope), float(intercept))
+    return curve
+
+
+def annotate_surplus(players: list[dict], league: LeagueConfig, config: "ModelConfig", matchdays: range | list[int]) -> dict:
+    """Attach expected price, market baseline and surplus to every player."""
+    for player in players:
+        points, fantavoto, probability = matchday_expectations(player, matchdays)
+        player["_epm"] = round(points, 4)
+        player["_fv"] = round(fantavoto, 4)
+        player["_pg"] = round(probability, 4)
+    market_price_expectations(players, league)
+    curve = market_value_curve(players, league, config)
+    for player in players:
+        slope, intercept = curve.get(player["ruolo"], (0.0, 0.0))
+        baseline = slope * float(np.log(max(player["prezzo_atteso"], league.minimum_bid))) + intercept
+        surplus = player["_epm"] - baseline
+        player["mercato"] = {
+            "prezzo_atteso": player["prezzo_atteso"],
+            "fp_per_giornata": player.pop("_epm"),
+            "fantavoto_medio": player.pop("_fv"),
+            "p_gioca_medio": player.pop("_pg"),
+            "atteso_dal_prezzo": round(float(baseline), 4),
+            "surplus": round(float(surplus), 4),
+            "surplus_per_credito": round(float(surplus) / max(player["prezzo_atteso"], league.minimum_bid), 5),
+            # A player whose rates were imputed from FVM sits on the curve by
+            # construction: his surplus carries no information.
+            "informativo": player["proiezione"]["fonte_rate"] == "storico",
+        }
+        player.pop("prezzo_atteso", None)
+    return {role: {"pendenza": round(s, 5), "intercetta": round(i, 5)} for role, (s, i) in curve.items()}
+
+
 def vote_standard_deviation(player_id: int, histories: list[pd.DataFrame], default: float) -> float:
     annual_means, appearances = [], 0.0
     for frame in histories:
@@ -472,6 +676,7 @@ def build_projections(raw: Path = RAW, output: Path = PROCESSED, config: ModelCo
             fixtures_by_team[home_team][matchday] = {"team_id": normalize(home_team), "matchday": matchday, "date": str(match.match_date)[:10], "opponent": away_team, "opponent_team_id": normalize(away_team), "venue": "CASA"}
         if away_team in fixtures_by_team:
             fixtures_by_team[away_team][matchday] = {"team_id": normalize(away_team), "matchday": matchday, "date": str(match.match_date)[:10], "opponent": home_team, "opponent_team_id": normalize(home_team), "venue": "TRASFERTA"}
+    rate_priors = fit_rate_priors(listone, histories, config) if config.impute_missing_history else {}
     players = []
     for _, player in listone.iterrows():
         guide_entry = guide[guide.id_fantacalcio == player.Id]
@@ -497,7 +702,14 @@ def build_projections(raw: Path = RAW, output: Path = PROCESSED, config: ModelCo
         mv = weighted_history(int(player.Id), histories, "Mv", 6.0 + team_prior, config.history_weights)
         std = vote_standard_deviation(int(player.Id), histories, config.default_std[player.R])
         # 75 minutes per rated appearance is the documented approximation.
-        per90 = lambda col: weighted_rate_per_appearance(int(player.Id), histories, col, config.history_weights)
+        # A player with no rated history would otherwise take zero for every rate,
+        # which is not a neutral value: it inflates goalkeepers and defenders and
+        # deflates midfielders and forwards. Fall back to the fitted market prior.
+        rates_imputed = bool(rate_priors) and not has_rated_history(int(player.Id), histories)
+        if rates_imputed:
+            per90 = lambda col: imputed_rate(rate_priors, player.R, col, float(player.FVM))
+        else:
+            per90 = lambda col: weighted_rate_per_appearance(int(player.Id), histories, col, config.history_weights)
         goal, assist = per90("Gf"), per90("Ass")
         yellow, red, autogoal = per90("Amm"), per90("Esp"), per90("Au")
         malus = yellow * -league.scoring_yellow_card + red * -league.scoring_red_card + autogoal * -league.scoring_own_goal
@@ -513,9 +725,13 @@ def build_projections(raw: Path = RAW, output: Path = PROCESSED, config: ModelCo
                 historical[season] = _clean_record(rows.iloc[0][["Pv", "Mv", "Fm", "Gf", "Gs", "Rp", "Rc", "R+", "R-", "Ass", "Amm", "Esp", "Au"]].to_dict())
         event_rates = {"gol": round(goal, 4), "assist": round(assist, 4), "ammonizioni": round(yellow, 4), "espulsioni": round(red, 4), "autogol": round(autogoal, 4), "gol_subiti": round(conceded, 4)}
         daily_play, daily_vote, daily_std, daily_bonus = fixture_projection_arrays(p_play, mv, std, bonus, team, fixtures_by_team.get(player.Squadra, {}), teams_by_key, config.season_days)
-        hierarchy = starter_entry.iloc[0].gerarchia_portiere if not starter_entry.empty else None
+        # Reading a single cell back out of a frame can hand over NaN where the
+        # column holds None — a blank hierarchy means "no stated hierarchy", not
+        # a number — so the value goes through the normaliser again on the way
+        # out. It is idempotent, and it keeps its validation on this path too.
+        hierarchy = normalize_goalkeeper_hierarchy(starter_entry.iloc[0].gerarchia_portiere) if not starter_entry.empty else None
         venues = [fixtures_by_team.get(player.Squadra, {}).get(day, {}).get("venue") for day in range(1, config.season_days + 1)]
-        players.append({"id": int(player.Id), "nome": player.Nome, "ruolo": player.R, "ruoli_mantra": player.RM, "squadra": player.Squadra, "team_id": normalize(player.Squadra), "quotazioni": {"attuale": int(player["Qt.A"]), "iniziale": int(player["Qt.I"]), "differenza": int(player["Diff."])}, "fvm_original": round(float(player.FVM), 2), "fvm_scaled": round(float(player.FVM) * .75, 2), "guida_asta_fascia": guide_entry.iloc[0].fascia if not guide_entry.empty else None, "gerarchia_portiere": hierarchy, "disponibilita": _clean_record({"status": status.iloc[0] if not status.empty else "NON_CLASSIFICATO", "nota": starter_entry.iloc[0].note if not starter_entry.empty else None}), "storico": historical, "proiezione": {"p_gioca": round(p_play, 4), "voto_puro": round(mv, 3), "deviazione": round(std, 3), "bonus": round(bonus, 3), "fantavoto": round(mv + bonus, 3)}, "event_rates": event_rates, "p_gioca_per_giornata": [round(value, 4) for value in daily_play], "voto_puro_mean_per_giornata": [round(value, 3) for value in daily_vote], "voto_puro_std_per_giornata": [round(value, 3) for value in daily_std], "bonus_atteso_per_giornata": [round(value, 3) for value in daily_bonus], "venue_per_giornata": venues})
+        players.append({"id": int(player.Id), "nome": player.Nome, "ruolo": player.R, "ruoli_mantra": player.RM, "squadra": player.Squadra, "team_id": normalize(player.Squadra), "quotazioni": {"attuale": int(player["Qt.A"]), "iniziale": int(player["Qt.I"]), "differenza": int(player["Diff."])}, "fvm_original": round(float(player.FVM), 2), "fvm_scaled": round(float(player.FVM) * .75, 2), "guida_asta_fascia": _or_none(guide_entry.iloc[0].fascia) if not guide_entry.empty else None, "gerarchia_portiere": hierarchy, "disponibilita": _clean_record({"status": status.iloc[0] if not status.empty else "NON_CLASSIFICATO", "nota": starter_entry.iloc[0].note if not starter_entry.empty else None}), "storico": historical, "proiezione": {"p_gioca": round(p_play, 4), "voto_puro": round(mv, 3), "deviazione": round(std, 3), "bonus": round(bonus, 3), "fantavoto": round(mv + bonus, 3), "fonte_rate": "prior_fvm" if rates_imputed else "storico"}, "event_rates": event_rates, "p_gioca_per_giornata": [round(value, 4) for value in daily_play], "voto_puro_mean_per_giornata": [round(value, 3) for value in daily_vote], "voto_puro_std_per_giornata": [round(value, 3) for value in daily_std], "bonus_atteso_per_giornata": [round(value, 3) for value in daily_bonus], "venue_per_giornata": venues})
     # Browser JSON parsing rejects Python's non-standard NaN spelling in blank score columns.
     calendar_records = calendar.astype(object).where(pd.notna(calendar), None).to_dict(orient="records")
     for match in calendar_records:
@@ -544,7 +760,12 @@ def build_projections(raw: Path = RAW, output: Path = PROCESSED, config: ModelCo
         "historical": {"matchdays": config.season_days, "label": f"storico {config.season_days}"},
         "current_league": {"serie_a_matchdays": current_matchdays, "label": f"lega corrente {len(current_matchdays)}"},
     }
-    payload = {"schema_version": "1.0", "model_version": "1.6", "players": players, "teams": team_records, "set_pieces": set_piece_records, "league_rules": league_rules, "calendario_serie_a": calendar_records, "calendario_lega": league_calendar, "meta": {"generato_il": datetime.now(timezone.utc).isoformat(), "versione_modello": "1.6", "profile": profile_meta, "horizons": horizons, "assunzioni": "75 minuti per voto; disponibilita da status e storico; gerarchia portieri esplicita; malus portieri incluso; lineup auto nel simulatore"}}
+    # Matchday arrays are indexed from Serie A matchday 1, so the league window
+    # has to be shifted onto them; the league may start after the season does.
+    league_days = [day - 1 for day in current_matchdays] if current_matchdays else list(range(config.season_days))
+    market_curve = annotate_surplus(players, league, config, league_days)
+    _reject_non_finite(players, "players")
+    payload = {"schema_version": "1.0", "model_version": "1.6", "players": players, "teams": team_records, "set_pieces": set_piece_records, "league_rules": league_rules, "calendario_serie_a": calendar_records, "calendario_lega": league_calendar, "meta": {"generato_il": datetime.now(timezone.utc).isoformat(), "versione_modello": "1.6", "profile": profile_meta, "horizons": horizons, "curva_mercato": market_curve, "assunzioni": "75 minuti per voto; disponibilita da status e storico; gerarchia portieri esplicita; malus portieri incluso; lineup auto nel simulatore"}}
     output.mkdir(parents=True, exist_ok=True)
     temporary_path: Path | None = None
     try:

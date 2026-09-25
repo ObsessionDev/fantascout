@@ -27,7 +27,18 @@ from .generate import (
     load_profile,
     resolve_profile,
 )
+from .config import LeagueConfig
 from .freshness import dataset_configuration_hash, simulation_configuration_hash, source_fingerprints
+from .optimize import (
+    filled_counts,
+    marginal_credit_value,
+    maximum_bid_for,
+    open_slots_by_role,
+    ensure_lineup_cache,
+    optimise,
+    reprice_remaining_market,
+    target_for,
+)
 from .league_calendar import build_legacy_calendar_template, preprocess_legacy_calendar
 from .simulation import RosterValidationError
 from .player_list_updates import (
@@ -256,6 +267,12 @@ class LocalApiHandler(BaseHTTPRequestHandler):
         if self._path() == "/api/simulate":
             self._simulate()
             return
+        if self._path() == "/api/auction/plan":
+            self._auction_plan()
+            return
+        if self._path() == "/api/auction/bid":
+            self._auction_bid()
+            return
         if self._path() != "/api/generate":
             self._error(HTTPStatus.NOT_FOUND, "not_found", "The requested endpoint does not exist.")
             return
@@ -280,6 +297,164 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             return
         else:
             self._send_json(HTTPStatus.OK, result)
+
+    def _auction_state(self) -> tuple[Any, Any, list[dict], list[dict], list[dict], float] | None:
+        """Shared preamble for the two auction routes.
+
+        The routes are stateless on purpose: `auction-store.js` stays the single
+        owner of the auction, and posts it here to be scored. Players arrive as
+        ids, never as names — eighteen surnames in the listing are shared, and a
+        misassignment during an auction cannot be undone.
+        """
+        request = self._read_json_object()
+        if request is None:
+            return None
+        try:
+            profile = resolve_profile(request, self.server.profiles_dir, profile_loader=self.server.profile_loader)
+        except ProfileRequestError as error:
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_profile", str(error))
+            return None
+        dataset_path = (self.server.datasets_dir / profile.profile_id /
+                        profile.season.season.replace("/", "-") / "auction_data.json")
+        try:
+            # The dataset is reread only when it changes on disk. During an
+            # auction it does not, and reparsing several megabytes for every
+            # bid would cost more than the advice itself.
+            stamp = (str(dataset_path), dataset_path.stat().st_mtime_ns)
+            cached = getattr(self.server, "_auction_dataset", None)
+            if cached and cached[0] == stamp:
+                players = cached[1]
+            else:
+                with dataset_path.open(encoding="utf-8") as handle:
+                    players = json.load(handle)["players"]
+                self.server._auction_dataset = (stamp, players)
+        except FileNotFoundError:
+            self._error(HTTPStatus.NOT_FOUND, "dataset_not_found",
+                        "Generate the dataset before asking for auction advice.")
+            return None
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError):
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "The dataset is invalid or unreadable.")
+            return None
+
+        # A dataset generated before the market block exists still parses, and
+        # every player then falls back to the minimum bid: the solver would buy
+        # the whole listing for a credit each and answer confidently with
+        # nonsense. Refuse instead, and say what to do about it.
+        if players and "mercato" not in players[0]:
+            self._error(HTTPStatus.CONFLICT, "dataset_outdated",
+                        "Questo dataset è stato generato prima dei prezzi di mercato. "
+                        "Rigeneralo da Impostazioni, o con advisor.pipeline, prima di usare i consigli d'asta.")
+            return None
+
+        by_id = {int(player["id"]): player for player in players}
+        def collect(key: str) -> tuple[list[dict], float] | None:
+            picked, paid = [], 0.0
+            for entry in request.get(key) or []:
+                if not isinstance(entry, dict):
+                    self._error(HTTPStatus.BAD_REQUEST, "invalid_purchase", f"{key} entries must be objects.")
+                    return None
+                try:
+                    player = by_id[int(entry["playerId"])]
+                    price = float(entry.get("price", 0))
+                except (KeyError, TypeError, ValueError):
+                    self._error(HTTPStatus.BAD_REQUEST, "invalid_purchase",
+                                f"Each {key} entry needs a known playerId and a numeric price.")
+                    return None
+                picked.append(player)
+                paid += price
+            return picked, paid
+
+        mine = collect("owned")
+        if mine is None:
+            return None
+        theirs = collect("taken")
+        if theirs is None:
+            return None
+        owned, paid = mine
+        taken, paid_by_others = theirs
+
+        league = LeagueConfig.from_profile(profile)
+        ensure_lineup_cache(profile.configuration_hash)
+        taken_ids = {player["id"] for player in taken}
+        # The reprice below mutates prices, so the shared dataset is copied per
+        # request: two managers' auction states must never bleed into each other.
+        available = [dict(player) for player in players if player["id"] not in taken_ids]
+        if owned or taken:
+            reprice_remaining_market(available, league, paid + paid_by_others, filled_counts(owned, taken))
+        return request, profile, league, available, owned, taken, league.starting_credits - paid
+
+    def _auction_plan(self) -> None:
+        """The best use of the credits still available, plus how the target stands."""
+        state = self._auction_state()
+        if state is None:
+            return
+        request, profile, league, available, owned, taken, budget = state
+        try:
+            k = float(request.get("k", 1))
+        except (TypeError, ValueError):
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_k", "k must be a number.")
+            return
+        target = target_for(profile, k)
+        try:
+            solution = optimise(available, league, owned=owned, budget=budget, target=target)
+        except Exception:
+            traceback.print_exc(file=sys.stderr)
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "advice_failed", "The auction plan could not be computed.")
+            return
+        owned_ids = {player["id"] for player in owned}
+        self._send_json(HTTPStatus.OK, {
+            "target": target,
+            "punti_attesi": round(solution.points, 3),
+            "raggiunge_target": solution.points >= target,
+            "crediti": {"disponibili": budget, "impegnati": round(solution.spent, 1),
+                        "non_allocati": round(solution.credits_left, 1)},
+            "crediti_per_fantapunto": round(1 / marginal_credit_value(solution), 1)
+            if marginal_credit_value(solution) > 0 else None,
+            # Every player sold counts, to any manager, not only mine.
+            "slot_aperti_lega": open_slots_by_role(league, filled_counts(owned, taken)),
+            "rosa": [{"id": player["id"], "nome": player["nome"], "ruolo": player["ruolo"],
+                      "squadra": player["squadra"], "mio": player["id"] in owned_ids,
+                      "prezzo_atteso": player.get("mercato", {}).get("prezzo_atteso"),
+                      "fp_per_giornata": player.get("mercato", {}).get("fp_per_giornata"),
+                      "informativo": player.get("mercato", {}).get("informativo", True)}
+                     for player in solution.roster],
+        })
+
+    def _auction_bid(self) -> None:
+        """The exact ceiling for the one player under the hammer."""
+        state = self._auction_state()
+        if state is None:
+            return
+        request, _, league, available, owned, _taken, budget = state
+        try:
+            called_id = int(request["playerId"])
+        except (KeyError, TypeError, ValueError):
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_player", "playerId is required and must be an integer.")
+            return
+        player = next((p for p in available if p["id"] == called_id), None)
+        if player is None:
+            self._error(HTTPStatus.BAD_REQUEST, "unknown_player",
+                        "playerId must name a player who is still available.")
+            return
+        try:
+            solution = optimise(available, league, owned=owned, budget=budget)
+            row = maximum_bid_for(available, league, solution, player, owned, budget)
+        except Exception:
+            traceback.print_exc(file=sys.stderr)
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "advice_failed", "The maximum bid could not be computed.")
+            return
+        self._send_json(HTTPStatus.OK, {
+            "id": player["id"], "nome": player["nome"], "ruolo": player["ruolo"], "squadra": player["squadra"],
+            "prezzo_atteso": row["prezzo_atteso"],
+            "prezzo_massimo": row["prezzo_massimo"],
+            "margine": row["margine"],
+            "guadagno": row["guadagno"],
+            "piano_saturo": row["piano_saturo"],
+            "fp_per_giornata": player.get("mercato", {}).get("fp_per_giornata"),
+            "surplus": player.get("mercato", {}).get("surplus"),
+            "informativo": player.get("mercato", {}).get("informativo", True),
+            "punti_piano": round(solution.points, 3),
+        })
 
     def _simulate(self) -> None:
         request = self._read_json_object()

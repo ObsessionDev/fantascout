@@ -122,11 +122,27 @@ class BenchSwitchConfig:
     bench_roles: tuple[str, ...]
     mode: str
     max_substitutions: int
+    # "by_role" keeps the upstream bench, a fixed composition per role.
+    # "any_role" is a bench of exactly `bench_size` players, whatever their role,
+    # which is what a league does when it names eleven and a bench of N. Both
+    # default to the upstream behaviour, so an existing profile is unaffected.
+    composition: str = "by_role"
+    bench_size: int | None = None
 
     def __post_init__(self) -> None:
         _require(self.mode in {"Basic", "Strict", "None"}, "switch mode must be Basic, Strict, or None")
         _require(all(role in ROLES for role in self.bench_roles), "bench roles must be P, D, C, or A")
         _positive(self.max_substitutions, "max_substitutions", allow_zero=True)
+        _require(self.composition in {"by_role", "any_role"}, "bench composition must be by_role or any_role")
+        if self.composition == "any_role":
+            _require(isinstance(self.bench_size, int) and not isinstance(self.bench_size, bool),
+                     "any_role bench requires an integer bench_size")
+            _positive(self.bench_size, "bench_size")
+
+    @property
+    def size(self) -> int:
+        """How many players sit on the bench, however it is composed."""
+        return self.bench_size if self.composition == "any_role" else len(self.bench_roles)
 
 
 @dataclass(frozen=True)
@@ -298,9 +314,10 @@ class LeagueProfile:
             for defenders, midfielders, _ in (formation.split("-") for formation in self.formations.allowed)
         )
         if not extra_formation:
-            _require(self.bench_switch.max_substitutions <= len(self.bench_switch.bench_roles), "max_substitutions cannot exceed bench size")
-        _require(self.roster_slots.P >= self.bench_switch.bench_roles.count("P"), "bench has more goalkeepers than roster")
-        _require(self.roster_slots.total >= 11 + len(self.bench_switch.bench_roles), "roster cannot cover XI and bench")
+            _require(self.bench_switch.max_substitutions <= self.bench_switch.size, "max_substitutions cannot exceed bench size")
+        if self.bench_switch.composition == "by_role":
+            _require(self.roster_slots.P >= self.bench_switch.bench_roles.count("P"), "bench has more goalkeepers than roster")
+        _require(self.roster_slots.total >= 11 + self.bench_switch.size, "roster cannot cover XI and bench")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -343,7 +360,7 @@ class LeagueProfile:
                 participants=ParticipantConfig(team_names=tuple(value["participants"]["team_names"]), user_team=value["participants"]["user_team"]),
                 credits=CreditsConfig(**value["credits"]), roster_slots=RosterSlots(**value["roster_slots"]),
                 formations=FormationConfig(allowed=tuple(value["formations"]["allowed"])),
-                bench_switch=BenchSwitchConfig(bench_roles=tuple(value["bench_switch"]["bench_roles"]), mode=value["bench_switch"]["mode"], max_substitutions=value["bench_switch"]["max_substitutions"]),
+                bench_switch=BenchSwitchConfig(bench_roles=tuple(value["bench_switch"]["bench_roles"]), mode=value["bench_switch"]["mode"], max_substitutions=value["bench_switch"]["max_substitutions"], composition=value["bench_switch"].get("composition", "by_role"), bench_size=value["bench_switch"].get("bench_size")),
                 scoring=ScoringEventValues(**value["scoring"]), virtual_goals=VirtualGoalConfig(**value["virtual_goals"]),
                 defense_modifier=DefenseModifierConfig(enabled=value["defense_modifier"]["enabled"], table_name=value["defense_modifier"]["table_name"], required_defenders=value["defense_modifier"]["required_defenders"], tiers=tuple(DefenseTier(**item) for item in value["defense_modifier"]["tiers"])),
                 standings=StandingsConfig(tie_breakers=tuple(value["standings"]["tie_breakers"]), **{key: item for key, item in value["standings"].items() if key != "tie_breakers"}),

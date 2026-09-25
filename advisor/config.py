@@ -10,6 +10,10 @@ class ModelConfig:
     european_rotation_discount: float = 0.90
     default_std: dict[str, float] = None  # type: ignore[assignment]
     defense_table: str = "LEAGUE"
+    # A player with no rated history gets his event rates from a per-role fit on
+    # log(1 + FVM) instead of from zero. See fit_rate_priors in pipeline.py.
+    impute_missing_history: bool = True
+    rate_prior_min_samples: int = 12
 
     def __post_init__(self):
         if self.default_std is None:
@@ -36,6 +40,8 @@ class LeagueConfig:
     bench_roles: tuple[str, ...] = ("P", "P", "D", "D", "D", "C", "C", "C", "A", "A", "A")
     switch_mode: str = "Basic"
     max_substitutions: int = 3
+    bench_composition: str = "by_role"
+    bench_size: int = 11
     slots: tuple[tuple[str, int], ...] = (("P", 3), ("D", 8), ("C", 8), ("A", 6))
     team_names: tuple[str, ...] = ()
     user_team: str = ""
@@ -56,6 +62,9 @@ class LeagueConfig:
     unplaced_payout_policy: str = "no_payout"
     incomplete_lineup_policy: str = "zero_score"
     incomplete_lineup_score: float = 0
+    minimum_bid: int = 1
+    bid_increment: int = 1
+    reserve_credits_per_open_slot: int = 1
 
     @classmethod
     def from_profile(cls, profile: LeagueProfile) -> "LeagueConfig":
@@ -79,6 +88,8 @@ class LeagueConfig:
             bench_roles=profile.bench_switch.bench_roles,
             switch_mode=profile.bench_switch.mode,
             max_substitutions=profile.bench_switch.max_substitutions,
+            bench_composition=profile.bench_switch.composition,
+            bench_size=profile.bench_switch.size,
             slots=tuple((role, getattr(profile.roster_slots, role)) for role in ("P", "D", "C", "A")),
             scoring_goal=profile.scoring.goal,
             scoring_assist=profile.scoring.assist,
@@ -93,7 +104,19 @@ class LeagueConfig:
             exact_tie_policy=profile.standings.exact_tie_policy,
             incomplete_lineup_policy=profile.incomplete_lineup.policy,
             incomplete_lineup_score=profile.incomplete_lineup.score,
+            minimum_bid=profile.auction.minimum_bid,
+            bid_increment=profile.auction.bid_increment,
+            reserve_credits_per_open_slot=profile.auction.reserve_credits_per_open_slot,
         )
+
+    @property
+    def roster_size(self) -> int:
+        return sum(count for _, count in self.slots)
+
+    @property
+    def credit_pool(self) -> int:
+        """Every credit that will change hands in the auction."""
+        return self.participants * self.starting_credits
 
     @property
     def roster_slots(self) -> dict[str, int]:

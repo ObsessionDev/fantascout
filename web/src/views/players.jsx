@@ -604,7 +604,36 @@ export function PlayerDetail({
             {player.proiezione.fantavoto.toFixed(2)}
           </span>
         </div>
+        {/* Both come straight from the dataset, so the listing costs nothing to
+            render: the solver is only needed once a player is under the hammer. */}
+        {Number.isFinite(Number(player.mercato?.prezzo_atteso)) ? (
+          <div className="stat">
+            <span className="stat-label">Prezzo atteso</span>
+            <span className="stat-value">
+              {Math.round(Number(player.mercato.prezzo_atteso))} cr
+            </span>
+          </div>
+        ) : null}
+        {Number.isFinite(Number(player.mercato?.surplus)) ? (
+          <div className="stat">
+            <span className="stat-label">Surplus</span>
+            <span className="stat-value">
+              {Number(player.mercato.surplus) > 0 ? "+" : ""}
+              {Number(player.mercato.surplus).toFixed(2)}
+            </span>
+            <span className="stat-note">FP/giornata sopra il suo prezzo</span>
+          </div>
+        ) : null}
       </div>
+
+      {/* A player whose rates were imputed from FVM sits on the market curve by
+          construction: his surplus is zero by definition, not by measurement. */}
+      {player.mercato?.informativo === false ? (
+        <p className="micro" role="note">
+          Nessuno storico utilizzabile: la proiezione deriva dal prezzo di
+          mercato, quindi il surplus non porta informazione.
+        </p>
+      ) : null}
 
       {outliers.length ? (
         <div className="notice notice--warn" role="note">

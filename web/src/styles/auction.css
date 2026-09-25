@@ -623,3 +623,78 @@
     backdrop-filter: none;
   }
 }
+
+/* ------------------------------------------------------------------ ceiling */
+
+/* The ceiling answers "when do I stop", so it is the loudest number on the
+   card after the verdict word. It reads the same three colours as every other
+   auction judgement: green while there is room, red past the limit. */
+.ceiling {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--ceiling-line, var(--c-line));
+  border-radius: var(--r-md, 10px);
+  background: var(--ceiling-tint, transparent);
+}
+
+.ceiling--under {
+  --ceiling-line: rgb(53 208 127 / 34%);
+  --ceiling-tint: var(--c-go-tint);
+  --ceiling-color: var(--c-go);
+}
+
+.ceiling--over,
+.ceiling--never {
+  --ceiling-line: rgb(255 93 93 / 34%);
+  --ceiling-tint: var(--c-stop-tint);
+  --ceiling-color: var(--c-stop);
+}
+
+.ceiling--muted {
+  --ceiling-color: var(--c-text-mute);
+}
+
+.ceiling-main {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.ceiling-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ceiling-color, var(--c-text-mute));
+}
+
+.ceiling-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+  color: var(--ceiling-color, var(--c-text));
+}
+
+.ceiling-unit {
+  font-size: 0.78rem;
+  color: var(--c-text-mute);
+}
+
+.ceiling-note {
+  font-size: 0.8rem;
+  color: var(--c-text-mute);
+}
+
+.ceiling-warn {
+  color: var(--c-warn);
+}
+
+/* A number being recomputed stays readable but visibly not current: blanking it
+   would read as "no opinion", which is the one thing it must never say. */
+.ceiling.is-stale {
+  opacity: 0.55;
+}
