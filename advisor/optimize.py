@@ -102,28 +102,36 @@ def ensure_lineup_cache(dataset_key: object) -> None:
         reset_lineup_cache(dataset_key)
 
 
-def lineup_value(roster: list[dict], league: LeagueConfig) -> float:
-    """Expected points of the best legal eleven, substitutions included.
+@dataclass
+class LineupPlan:
+    """The legal formation, XI and ordered bench behind `lineup_value`'s score.
 
-    Charging a starter for the matchdays he misses, as the listing measure does,
-    understates a roster by roughly a seventh: the expected number of absences
-    in an eleven is well below the substitution cap, so most missed votes are
-    covered by the bench. The value of a slot is therefore the starter when he
-    plays plus the bench behind him when he does not, with the total number of
-    substitutions capped as the profile dictates.
+    The auction only ever needed the number, so it stayed inside the function.
+    A single matchday needs the selection itself — who starts, who is next in
+    at each position — which is why this exists alongside it rather than in
+    place of it.
     """
-    # Only who is in the roster matters here, never what was paid, so the value
-    # is memoised on the set of players. The search re-evaluates the same
-    # rosters constantly while bisecting a price.
-    key = frozenset(p["id"] for p in roster)
-    cached = _LINEUP_CACHE.get(key)
-    if cached is not None:
-        return cached
+    value: float = 0.0
+    formation: tuple[int, int, int] | None = None
+    starters: dict[str, list[dict]] = field(default_factory=dict)
+    bench: dict[str, list[dict]] = field(default_factory=dict)
+    unused: list[dict] = field(default_factory=list)
+
+
+def best_lineup(roster: list[dict], league: LeagueConfig) -> LineupPlan:
+    """The formation, starters and bench order that maximise `lineup_value`.
+
+    Same model as `lineup_value` — coverage, the substitution cap, the
+    incomplete-lineup score — kept in one place so the two never drift apart.
+    `formation` is `None` when no allowed shape can be filled at all, which a
+    caller building an actual lineup must treat as "no legal lineup exists",
+    not as a zero-value one.
+    """
     by_role = {role: sorted((p for p in roster if p["ruolo"] == role), key=_fantavoto, reverse=True) for role in ROLES}
+    plan = LineupPlan(unused=list(roster))
     if not by_role["P"]:
-        return 0.0
+        return plan
     substitutions_allowed = league.max_substitutions if league.switch_mode != "None" else 0
-    best = 0.0
     for defenders, midfielders, forwards in parse_formations(league):
         need = {"P": 1, "D": defenders, "C": midfielders, "A": forwards}
         if any(len(by_role[role]) < count for role, count in need.items()):
@@ -154,11 +162,37 @@ def lineup_value(roster: list[dict], league: LeagueConfig) -> float:
                 total += probability * _fantavoto(player)
                 total += missing * covered * coverage_by_role[role]
                 total += missing * (1 - covered) * league.incomplete_lineup_score
-        best = max(best, total)
+        if plan.formation is None or total > plan.value:
+            bench_by_role = {role: [p for p in spare if p["ruolo"] == role] for role in ROLES}
+            used_ids = {p["id"] for group in starters.values() for p in group} | {p["id"] for p in spare}
+            plan = LineupPlan(value=total, formation=(defenders, midfielders, forwards),
+                              starters=starters, bench=bench_by_role,
+                              unused=[p for p in roster if p["id"] not in used_ids])
+    return plan
+
+
+def lineup_value(roster: list[dict], league: LeagueConfig) -> float:
+    """Expected points of the best legal eleven, substitutions included.
+
+    Charging a starter for the matchdays he misses, as the listing measure does,
+    understates a roster by roughly a seventh: the expected number of absences
+    in an eleven is well below the substitution cap, so most missed votes are
+    covered by the bench. The value of a slot is therefore the starter when he
+    plays plus the bench behind him when he does not, with the total number of
+    substitutions capped as the profile dictates.
+    """
+    # Only who is in the roster matters here, never what was paid, so the value
+    # is memoised on the set of players. The search re-evaluates the same
+    # rosters constantly while bisecting a price.
+    key = frozenset(p["id"] for p in roster)
+    cached = _LINEUP_CACHE.get(key)
+    if cached is not None:
+        return cached
+    value = best_lineup(roster, league).value
     if len(_LINEUP_CACHE) >= _LINEUP_CACHE_LIMIT:
         _LINEUP_CACHE.clear()
-    _LINEUP_CACHE[key] = best
-    return best
+    _LINEUP_CACHE[key] = value
+    return value
 
 
 @dataclass
@@ -511,8 +545,8 @@ def load_players(path: Path) -> list[dict]:
     return json.loads(Path(path).read_text(encoding="utf-8"))["players"]
 
 
-def resolve_players(players: list[dict], spec: str) -> tuple[list[dict], float]:
-    """`"Nome:prezzo"` or `"#id:prezzo"`; prices are what was actually paid.
+def resolve_player_token(players: list[dict], token: str) -> dict:
+    """Match a single `"Nome"` or `"#id"` token to exactly one player.
 
     The listing has no exact duplicate names but eighteen shared surnames
     (`Martinez Jo.` and `Martinez L.`, `Terracciano` and `Terracciano F.`), and
@@ -520,27 +554,34 @@ def resolve_players(players: list[dict], spec: str) -> tuple[list[dict], float]:
     does not identify exactly one player is refused rather than guessed; any
     caller that has an id, the UI included, should pass `#id`.
     """
+    token = token.strip()
+    if token.startswith("#"):
+        by_id = {str(p["id"]): p for p in players}
+        player = by_id.get(token[1:])
+        if player is None:
+            raise SystemExit(f"id non trovato: {token!r}")
+        return player
+    matches = [p for p in players if p["nome"].lower() == token.lower()]
+    if not matches:
+        near = [p["nome"] for p in players if token.lower() in p["nome"].lower()][:5]
+        raise SystemExit(f"giocatore non trovato: {token!r}" + (f" — forse: {', '.join(near)}" if near else ""))
+    if len(matches) > 1:
+        raise SystemExit(f"nome ambiguo {token!r}: " +
+                         ", ".join(f"#{p['id']} {p['nome']} ({p['squadra']})" for p in matches))
+    return matches[0]
+
+
+def resolve_players(players: list[dict], spec: str) -> tuple[list[dict], float]:
+    """`"Nome:prezzo"` or `"#id:prezzo"`; prices are what was actually paid.
+
+    See `resolve_player_token` for how a token is matched.
+    """
     owned, paid = [], 0.0
-    by_id = {str(p["id"]): p for p in players}
     for chunk in filter(None, (piece.strip() for piece in spec.split(","))):
         token, _, price = chunk.rpartition(":")
         if not token:
             token, price = chunk, ""
-        token = token.strip()
-        if token.startswith("#"):
-            player = by_id.get(token[1:])
-            if player is None:
-                raise SystemExit(f"id non trovato: {token!r}")
-        else:
-            matches = [p for p in players if p["nome"].lower() == token.lower()]
-            if not matches:
-                near = [p["nome"] for p in players if token.lower() in p["nome"].lower()][:5]
-                raise SystemExit(f"giocatore non trovato: {token!r}" + (f" — forse: {', '.join(near)}" if near else ""))
-            if len(matches) > 1:
-                raise SystemExit(f"nome ambiguo {token!r}: " +
-                                 ", ".join(f"#{p['id']} {p['nome']} ({p['squadra']})" for p in matches))
-            player = matches[0]
-        owned.append(player)
+        owned.append(resolve_player_token(players, token))
         paid += float(price or 0)
     return owned, paid
 
