@@ -153,12 +153,18 @@ class ScoringEventValues:
     red_card: float
     own_goal: float
     goalkeeper_conceded_goal: float
+    # Optional events (REQUISITI R6). Zero keeps an older profile unchanged.
+    penalty_saved: float = 0
+    penalty_missed: float = 0
+    clean_sheet: float = 0
 
     def __post_init__(self) -> None:
         _positive(self.goal, "goal value")
         _positive(self.assist, "assist value", allow_zero=True)
         _require(self.yellow_card <= 0 and self.red_card <= 0 and self.own_goal <= 0 and self.goalkeeper_conceded_goal <= 0,
                  "card, own-goal, and goalkeeper-conceded values must be non-positive")
+        _require(self.penalty_saved >= 0 and self.clean_sheet >= 0, "penalty-saved and clean-sheet values must be non-negative")
+        _require(self.penalty_missed <= 0, "penalty-missed value must be non-positive")
 
 
 @dataclass(frozen=True)
