@@ -7,7 +7,7 @@ abbiamo già.
 L'asta è un evento, la stagione è trentasei. Tutto quello che segue vale più
 dell'asta in termini di punti, e ha molto più tempo per essere fatto bene.
 
-## 1. Formazione di ogni giornata — in corso
+## 1. Formazione di ogni giornata — fasi 1-2 costruite
 
 **La domanda:** chi schierare questa giornata, dati i miei venticinque.
 
@@ -18,13 +18,20 @@ della copertura panchina e del cap sui cambi. `advisor.lineup` lo applica a una
 sola giornata: dati una rosa, una giornata e le indisponibilità, restituisce
 l'undici, la panchina in ordine e le note (`README.md`, sezione "Matchday
 Lineup"). L'esportazione della rosa dalla dashboard (fase 1 della proposta) è
-il pulsante **Esporta la mia rosa** nella schermata asta.
+il pulsante **Esporta la mia rosa** nella schermata asta; la fase 2 è la
+schermata **Formazione** della dashboard, che chiama lo stesso motore via
+`POST /api/lineup` e mostra per ogni titolare il perché (avversario, incertezza,
+rigorista) e un confronto libero con la formazione che Mattia avrebbe messo.
+Le giornate giocate entrano nel modello dalla sezione Aggiornamenti della
+dashboard (`POST /api/matchdays/*`), non solo da `advisor.aggiorna` a riga di
+comando.
 
 **Cosa manca ancora:** la disponibilità vicino alla scadenza è oggi scritta a
-mano (`--indisponibili`, `--dubbi`); leggerla dalle probabili formazioni dei
-siti sportivi è la fase 3, non ancora costruita — prima vanno letti i termini
-d'uso dei siti candidati. Manca anche il flusso su Telegram (fase 4: `/formazione`
-o pianificato) e la varianza contro l'avversario, discussa sotto.
+mano (nella schermata, o via `--indisponibili`/`--dubbi` da terminale); leggerla
+dalle probabili formazioni dei siti sportivi è la fase 3, non ancora
+costruita — prima vanno letti i termini d'uso dei siti candidati. Manca anche
+il flusso su Telegram (fase 4: `/formazione` o pianificato) e la varianza
+contro l'avversario, discussa sotto.
 
 **Nota sulla varianza:** a differenza dell'asta, qui il criterio giusto non è
 sempre la media. Contro un avversario più forte conviene alzare la varianza,
