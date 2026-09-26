@@ -37,7 +37,7 @@ cd web && npm install
 Start the local API from the repository root:
 
 ```bash
-.venv/bin/python -m advisor.server --host 127.0.0.1 --port 8000
+.venv/bin/python -m advisor.server --host 127.0.0.1 --port 8441
 ```
 
 In another terminal, start Vite:
@@ -47,7 +47,7 @@ cd web
 npm run dev
 ```
 
-Open the Vite URL. On first launch the application opens **Impostazioni**.
+Open http://127.0.0.1:8442. On first launch the application opens **Impostazioni**.
 The included sources are enough to use **Genera dati** for the dashboard,
 projections, and auction tools. Upload a compatible private
 `calendario_lega.xlsx` and regenerate the dataset only before running the
@@ -137,7 +137,7 @@ browser owns, with players identified by id:
 | `POST /api/auction/bid` | exact maximum bid for the player under the hammer | ~1.2 s |
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/auction/bid -H 'Content-Type: application/json' \
+curl -X POST http://127.0.0.1:8441/api/auction/bid -H 'Content-Type: application/json' \
   -d '{"profile_id":"lega-2026-27","playerId":5585,
        "owned":[{"playerId":2170,"price":12}],
        "taken":[{"playerId":5841,"price":90}]}'

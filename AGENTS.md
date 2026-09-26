@@ -12,9 +12,9 @@
 ## Setup And Run
 
 - From the repository root, create/install Python dependencies with `python -m venv .venv` and `.venv/bin/pip install -r requirements.txt`; install client dependencies with `cd web && npm install`.
-- Run the API from the repository root with `.venv/bin/python -m advisor.server --host 127.0.0.1 --port 8000`, then run Vite in a second terminal with `cd web && npm run dev`.
+- Run the API from the repository root with `.venv/bin/python -m advisor.server --host 127.0.0.1 --port 8441`, then run Vite in a second terminal with `cd web && npm run dev`.
 - The UI can generate dashboard, projection, and auction data without the private league calendar; upload it in **Impostazioni** and regenerate before running season simulation. Do not add `data/raw/calendario_lega.xlsx` or other league-identifying inputs to git.
-- `VITE_LOCAL_API_BASE` optionally overrides the client API URL; otherwise it uses `http://127.0.0.1:8000`.
+- `VITE_LOCAL_API_BASE` optionally overrides the client API URL; otherwise it uses `http://127.0.0.1:8441`.
 
 ## Data Workflow
 

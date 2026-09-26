@@ -33,7 +33,7 @@ npm install
 Start the API from the repository root:
 
 ```bash
-.venv/bin/python -m advisor.server --host 127.0.0.1 --port 8000
+.venv/bin/python -m advisor.server --host 127.0.0.1 --port 8441
 ```
 
 In another terminal, start the web client:

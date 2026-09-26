@@ -1260,7 +1260,7 @@ def main(argv: list[str] | None = None) -> None:
     """Run the local API without creating a server during module import."""
     parser = argparse.ArgumentParser(description="Run the local fantasy advisor API.")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--port", type=int, default=8441)
     parser.add_argument("--profiles-dir", type=Path, default=Path("config/profiles"))
     parser.add_argument("--datasets-dir", type=Path, default=Path("data/processed"))
     parser.add_argument("--uploads-dir", type=Path, default=Path("data/uploads"))

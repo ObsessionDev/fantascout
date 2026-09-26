@@ -48,13 +48,14 @@ cd web && npm install
 
 ```bash
 # terminale 1
-.venv/bin/python -m advisor.server --host 127.0.0.1 --port 8000
+.venv/bin/python -m advisor.server --host 127.0.0.1 --port 8441
 # terminale 2
 cd web && npm run dev
 ```
 
 `VITE_LOCAL_API_BASE` sovrascrive l'URL API del client; default
-`http://127.0.0.1:8000`.
+`http://127.0.0.1:8441`. La GUI si apre su `http://127.0.0.1:8442`. Le due porte
+sono assegnate dal registro delle porte di Mike e non si cambiano.
 
 ## Workflow dati
 

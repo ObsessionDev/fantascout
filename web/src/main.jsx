@@ -128,7 +128,7 @@ function App() {
   const [historyIndex, setHistoryIndex] = useState(0);
   // An empty override deliberately enables same-origin requests behind Docker.
   const apiBase =
-    import.meta.env.VITE_LOCAL_API_BASE ?? "http://127.0.0.1:8000";
+    import.meta.env.VITE_LOCAL_API_BASE ?? "http://127.0.0.1:8441";
   const loadedProfileId = useRef(null);
   const profileRequests = useRef(null);
   const generationRequests = useRef(null);

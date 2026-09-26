@@ -784,7 +784,7 @@ export function Updates({
           <div className="update-error" role="alert">
             <strong>Backend da riavviare</strong>
             <p>{message}</p>
-            <code>.venv/bin/python -m advisor.server --host 127.0.0.1 --port 8000</code>
+            <code>.venv/bin/python -m advisor.server --host 127.0.0.1 --port 8441</code>
           </div>
         )}
         {message && problem !== "backend_restart_required" && <p className={`update-message ${problem ? "error" : ""}`} role="status">{message}</p>}
