@@ -124,7 +124,7 @@ class LocalApiServer(ThreadingHTTPServer):
 
     def __init__(
         self,
-        address: tuple[str, int] = ("127.0.0.1", 8000),
+        address: tuple[str, int] = ("127.0.0.1", 8441),
         *,
         profiles_dir: Path | str = Path("config/profiles"),
         datasets_dir: Path | str = Path("data/processed"),
@@ -1229,7 +1229,7 @@ class LocalApiHandler(BaseHTTPRequestHandler):
 
 
 def create_server(
-    address: tuple[str, int] = ("127.0.0.1", 8000),
+    address: tuple[str, int] = ("127.0.0.1", 8441),
     *,
     profiles_dir: Path | str = Path("config/profiles"),
     datasets_dir: Path | str = Path("data/processed"),
