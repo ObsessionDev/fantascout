@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from advisor.config import LeagueConfig
 from advisor.league_profile import LeagueProfile
 from advisor.league_calendar import build_legacy_calendar_template, parse_legacy_two_block_frame
 from advisor.pipeline import LISTONE_COLUMNS
@@ -64,6 +65,7 @@ class LocalApiServerTests(unittest.TestCase):
             datasets_dir=root / "data/processed",
             uploads_dir=root / "data/uploads",
             updates_dir=root / "data/updates",
+            raw_dir=root / "data/raw",
             generator=generator,
             simulator=simulator,
             update_fetcher=update_fetcher,
@@ -766,6 +768,162 @@ class LocalApiServerTests(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "generation_failed")
         self.assertEqual((self.server.profiles_dir / "my-team.json").read_bytes(), old_profile)
         self.assertEqual(json.loads(output.read_text(encoding="utf-8")), {"old": True})
+
+    def _canonical_matchday_csv(self, giornata=5, player_id=1, voto=6.5, squadra="AAA"):
+        return pd.DataFrame([{
+            "giornata": giornata, "id_fantacalcio": player_id, "nome": "One", "squadra": squadra, "ruolo": "A",
+            "voto": voto, "gol": 1, "assist": 0, "ammonizioni": 0, "espulsioni": 0, "autogol": 0,
+            "gol_subiti": 0, "rigori_parati": 0, "rigori_sbagliati": 0, "rigori_segnati": 0,
+        }]).to_csv(index=False).encode("utf-8")
+
+    def test_matchday_status_reports_imported_and_missing_giornate(self):
+        body = json.dumps({"profile": self.profile}).encode("utf-8")
+        response, status = self.request("POST", "/api/matchdays/status", body, {"Content-Type": "application/json"})
+        self.assertEqual(response.status, 200)
+        start, end = self.profile["season"]["fantasy_start_matchday"], self.profile["season"]["fantasy_end_matchday"]
+        self.assertEqual(status["prima_giornata"], start)
+        self.assertEqual(status["ultima_giornata"], end)
+        self.assertEqual(status["giornate_importate"], [])
+        self.assertEqual(status["giornate_mancanti"], list(range(start, end + 1)))
+
+        votes_dir = self.server.raw_dir.parent / "updates/voti" / self.profile["season"]["season"].replace("/", "-")
+        votes_dir.mkdir(parents=True)
+        (votes_dir / f"giornata_{start:02d}.csv").write_bytes(self._canonical_matchday_csv(giornata=start))
+
+        response, status = self.request("POST", "/api/matchdays/status", body, {"Content-Type": "application/json"})
+        self.assertEqual(response.status, 200)
+        self.assertEqual(status["giornate_importate"], [start])
+        self.assertNotIn(start, status["giornate_mancanti"])
+
+    def test_matchday_candidate_upload_accepts_a_valid_csv_and_rejects_a_bad_one(self):
+        start = self.profile["season"]["fantasy_start_matchday"]
+        response, preview = self.request(
+            "PUT", f"/api/updates/matchday/candidate/my-team/{start}",
+            self._canonical_matchday_csv(giornata=start),
+            {"Content-Type": "text/csv", "X-Filename": "voti.csv"},
+        )
+        self.assertEqual(response.status, 200)
+        self.assertEqual(preview["giornata"], start)
+        self.assertEqual(preview["righe"], 1)
+        self.assertEqual(preview["squadre"], 1)
+        self.assertEqual(preview["senza_voto"], 0)
+        staged = self.server.uploads_dir / "my-team/matchdays" / f"giornata_{start:02d}.csv"
+        self.assertTrue(staged.is_file())
+
+        response, error = self.request(
+            "PUT", f"/api/updates/matchday/candidate/my-team/{start}",
+            b"nome,voto\nOne,7\n",
+            {"Content-Type": "text/csv", "X-Filename": "bad.csv"},
+        )
+        self.assertEqual(response.status, 422)
+        self.assertEqual(error["error"]["code"], "invalid_matchday_file")
+        # The rejected file is not left behind to be applied by mistake.
+        self.assertFalse(staged.exists())
+
+    def test_matchday_apply_requires_a_staged_candidate(self):
+        body = json.dumps({"profile": self.profile, "giornata": 5}).encode("utf-8")
+        response, payload = self.request("POST", "/api/matchdays/apply", body, {"Content-Type": "application/json"})
+        self.assertEqual(response.status, 404)
+        self.assertEqual(payload["error"]["code"], "candidate_not_found")
+
+    def test_matchday_apply_imports_the_candidate_and_regenerates(self):
+        start = self.profile["season"]["fantasy_start_matchday"]
+        self.request(
+            "PUT", f"/api/updates/matchday/candidate/my-team/{start}",
+            self._canonical_matchday_csv(giornata=start),
+            {"Content-Type": "text/csv", "X-Filename": "voti.csv"},
+        )
+
+        def generator(profile, datasets_dir):
+            self.calls.append(profile)
+            path = datasets_dir / profile.profile_id / profile.season.season.replace("/", "-") / "auction_data.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({
+                "players": [{"id": 1, "nome": "One", "mercato": {"fp_per_giornata": 7.0},
+                            "proiezione": {"giornate_osservate": 1}}],
+                "model_version": "2.0",
+            }), encoding="utf-8")
+
+        self.server.generator = generator
+        body = json.dumps({"profile": self.profile, "giornata": start}).encode("utf-8")
+        response, payload = self.request("POST", "/api/matchdays/apply", body, {"Content-Type": "application/json"})
+        self.assertEqual(response.status, 200)
+        self.assertEqual(payload["giornata"], start)
+        self.assertEqual(payload["giocatori"], 1)
+        self.assertEqual(payload["model_version"], "2.0")
+        written = Path(payload["file_importato"])
+        self.assertTrue(written.is_file())
+        self.assertEqual(pd.read_csv(written).giornata.iloc[0], start)
+        staged = self.server.uploads_dir / "my-team/matchdays" / f"giornata_{start:02d}.csv"
+        self.assertFalse(staged.exists())
+
+        # Applying again reports the same candidate as missing, not stale state.
+        response, payload = self.request("POST", "/api/matchdays/apply", body, {"Content-Type": "application/json"})
+        self.assertEqual(response.status, 404)
+
+    def _full_roster(self):
+        """One player per league slot (3P/8D/8C/6A in the default profile), so
+        every allowed formation can be filled — a legality precondition of
+        `build_lineup`, unrelated to what this test actually checks."""
+        league = LeagueConfig.from_profile(LeagueProfile.from_dict(self.profile))
+        players, striker_id, next_id = [], None, 1
+        for role, slots in league.slots:
+            for index in range(slots):
+                fantavoto = 6.0 + (1.0 if role == "A" and index == 0 else 0.0) - index * 0.05
+                players.append({
+                    "id": next_id, "nome": f"{role}{next_id}", "ruolo": role, "squadra": "AAA",
+                    "p_gioca_per_giornata": [0.9], "voto_puro_mean_per_giornata": [fantavoto],
+                    "bonus_atteso_per_giornata": [0.0], "voto_puro_std_per_giornata": [0.5],
+                    "proiezione": {"p_gioca": 0.9, "fantavoto": fantavoto},
+                })
+                if role == "A" and index == 0:
+                    striker_id = next_id
+                next_id += 1
+        return players, striker_id
+
+    def test_lineup_build_returns_the_xi_ordered_bench_and_reasons(self):
+        players, striker_id = self._full_roster()
+        dataset = {
+            "players": players,
+            "teams": [{"squadra": "AAA", "fixtures": [{"matchday": 1, "opponent": "BBB", "venue": "CASA"}]}],
+            "set_pieces": [{"squadra": "AAA", "tipo": "RIGORI", "takers": [{"player_id": striker_id, "priorita": 1}]}],
+        }
+        dataset_path = self.server.datasets_dir / "my-team" / self.profile["season"]["season"].replace("/", "-") / "auction_data.json"
+        dataset_path.parent.mkdir(parents=True, exist_ok=True)
+        dataset_path.write_text(json.dumps(dataset), encoding="utf-8")
+
+        body = json.dumps({
+            "profile": self.profile, "roster": [p["id"] for p in players], "giornata": 1,
+        }).encode("utf-8")
+        response, payload = self.request("POST", "/api/lineup", body, {"Content-Type": "application/json"})
+        self.assertEqual(response.status, 200)
+        self.assertEqual(payload["giornata"], 1)
+        striker = next(row for row in payload["titolari"] if row["id"] == striker_id)
+        self.assertEqual(striker["avversario"], "BBB")
+        self.assertFalse(striker["trasferta"])
+        self.assertEqual(striker["rigorista_priorita"], 1)
+        self.assertEqual(striker["incertezza"], 0.5)
+
+    def test_lineup_build_reports_unavailable_players_and_unknown_ids(self):
+        players, _ = self._full_roster()
+        dataset_path = self.server.datasets_dir / "my-team" / self.profile["season"]["season"].replace("/", "-") / "auction_data.json"
+        dataset_path.parent.mkdir(parents=True, exist_ok=True)
+        dataset_path.write_text(json.dumps({"players": players}), encoding="utf-8")
+        roster_ids = [p["id"] for p in players]
+        goalkeeper_ids = [p["id"] for p in players if p["ruolo"] == "P"]
+
+        body = json.dumps({"profile": self.profile, "roster": roster_ids + [9999], "giornata": 1}).encode("utf-8")
+        response, payload = self.request("POST", "/api/lineup", body, {"Content-Type": "application/json"})
+        self.assertEqual(response.status, 400)
+        self.assertEqual(payload["error"]["code"], "unknown_player")
+
+        # Every goalkeeper unavailable: no legal formation can be filled.
+        body = json.dumps({"profile": self.profile, "roster": roster_ids, "giornata": 1,
+                           "indisponibili": goalkeeper_ids}).encode("utf-8")
+        response, payload = self.request("POST", "/api/lineup", body, {"Content-Type": "application/json"})
+        self.assertEqual(response.status, 422)
+        self.assertEqual(payload["error"]["code"], "lineup_impossible")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -58,6 +58,28 @@ def matchday_snapshot(player: dict, day_index: int, probability_override: float 
     return snapshot
 
 
+def team_fixture(teams: list[dict] | None, team_name: str, giornata: int) -> dict | None:
+    """The league fixture `team_name` plays on Serie A matchday `giornata`, if known."""
+    if not teams:
+        return None
+    team = next((t for t in teams if t.get("squadra") == team_name), None)
+    if not team:
+        return None
+    return next((f for f in team.get("fixtures", []) if f.get("matchday") == giornata), None)
+
+
+def penalty_priority(set_pieces: list[dict] | None, team_name: str, player_id: int) -> int | None:
+    """1 for the designated penalty taker of `team_name`, 2/3 for backups, `None` otherwise."""
+    if not set_pieces:
+        return None
+    for entry in set_pieces:
+        if entry.get("squadra") == team_name and entry.get("tipo") == "RIGORI":
+            for taker in entry.get("takers", []):
+                if taker.get("player_id") == player_id:
+                    return taker.get("priorita")
+    return None
+
+
 def _formation_shortfall(available: list[dict], league: LeagueConfig) -> str:
     """Why no allowed formation could be filled, in terms Mattia can act on."""
     counts = {role: sum(1 for p in available if p["ruolo"] == role) for role in ROLES}
@@ -101,7 +123,9 @@ class LineupReport:
 
 def build_lineup(roster: list[dict], league: LeagueConfig, day_index: int,
                  unavailable: set[int] | None = None,
-                 doubtful: dict[int, float] | None = None) -> LineupReport:
+                 doubtful: dict[int, float] | None = None,
+                 teams: list[dict] | None = None,
+                 set_pieces: list[dict] | None = None) -> LineupReport:
     """The XI, ordered bench and notes for one matchday of the given roster.
 
     `day_index` is 0-based (Serie A matchday N is index N-1), matching every
@@ -109,6 +133,12 @@ def build_lineup(roster: list[dict], league: LeagueConfig, day_index: int,
     `pipeline.py`). Raises `LineupError` when no allowed formation can be
     filled from the players left after `unavailable` is removed — that is a
     roster problem, not a value of zero.
+
+    `teams` and `set_pieces` are the dataset's own top-level lists (unrelated
+    to the roster): passing them adds the opponent, venue and penalty-taker
+    standing to every starter and bench row, the "why" behind each choice.
+    Omitting them leaves those fields `None`, which keeps the CLI usage above
+    (no full dataset in hand, only the roster) unchanged.
     """
     if day_index < 0:
         raise ValueError("la giornata deve essere un numero positivo")
@@ -123,15 +153,25 @@ def build_lineup(roster: list[dict], league: LeagueConfig, day_index: int,
 
     by_id = {p["id"]: p for p in eligible}
 
+    giornata_1based = day_index + 1
+
     def row(snapshot: dict) -> dict:
         original = by_id[snapshot["id"]]
         mercato = snapshot["mercato"]
+        std_per_giornata = original.get("voto_puro_std_per_giornata") or []
+        incertezza = (round(float(std_per_giornata[day_index]), 3) if day_index < len(std_per_giornata)
+                     else original.get("proiezione", {}).get("deviazione"))
+        fixture = team_fixture(teams, original["squadra"], giornata_1based)
         return {
             "id": original["id"], "nome": original["nome"], "ruolo": original["ruolo"],
             "squadra": original["squadra"],
             "p_gioca": round(float(mercato["p_gioca_medio"]), 3),
             "fantavoto_atteso": round(float(mercato["fantavoto_medio"]), 3),
             "dubbio": original["id"] in doubtful,
+            "incertezza": incertezza,
+            "avversario": fixture.get("opponent") if fixture else None,
+            "trasferta": (fixture.get("venue") == "TRASFERTA") if fixture else None,
+            "rigorista_priorita": penalty_priority(set_pieces, original["squadra"], original["id"]),
         }
 
     def bare(player: dict) -> dict:
