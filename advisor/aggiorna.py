@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -21,6 +23,17 @@ from .config import LeagueConfig
 from .inseason import import_votes_workbook, matchday_backtest, read_matchdays, validate_matchday, votes_dir, write_matchday
 from .league_profile import LeagueProfile
 from .pipeline import PROCESSED, RAW, build_projections
+
+Generator = Callable[[Any, Path], Any]
+
+
+def parse_matchday_file(path: Path, matchday: int) -> pd.DataFrame:
+    """Parse a canonical CSV or a Fantacalcio "voti" workbook into one matchday's votes."""
+    if path.suffix.lower() in {".xlsx", ".xls"}:
+        return import_votes_workbook(path, matchday)
+    frame = pd.read_csv(path)
+    frame["giornata"] = matchday
+    return validate_matchday(frame, str(path))
 
 
 def import_file(path: Path, raw: Path, season: str, matchday: int | None) -> Path:
@@ -43,6 +56,53 @@ def _points(dataset: Path) -> dict[int, tuple[str, float]]:
     return {p["id"]: (p["nome"], p["mercato"]["fp_per_giornata"]) for p in payload["players"]}
 
 
+def regenerate_with_diff(raw: Path, output: Path, profile: LeagueProfile, generator: Generator | None = None) -> dict:
+    """Regenerate the projections and report who moved the most.
+
+    `generator` lets a caller that already owns a pipeline generator (the API
+    server's, injected for tests) reuse this instead of importing
+    `build_projections` a second time; without one this calls it directly, as
+    the CLI does.
+    """
+    season = profile.season.season
+    dataset = output / profile.profile_id / season.replace("/", "-") / "auction_data.json"
+    before = _points(dataset)
+    if generator is not None:
+        generator(profile, output)
+        payload = json.loads(dataset.read_text(encoding="utf-8"))
+    else:
+        payload = build_projections(raw, output, profile=profile)
+    players = payload["players"]
+    observed = max((p["proiezione"].get("giornate_osservate", 0) for p in players), default=0)
+    result: dict[str, Any] = {
+        "giocatori": len(players),
+        "model_version": payload.get("model_version"),
+        "giornate_osservate": observed,
+        "sale": [],
+        "scende": [],
+    }
+    if before:
+        moves = sorted(((p["mercato"]["fp_per_giornata"] - before[p["id"]][1], p["nome"])
+                        for p in players if p["id"] in before), reverse=True)
+        if moves:
+            # Disjoint from the top movers, so a short list of movers never
+            # shows the same player as both rising and falling.
+            bottom_start = max(5, len(moves) - 5)
+            result["sale"] = [{"nome": name, "delta": round(delta, 2)} for delta, name in moves[:5]]
+            result["scende"] = [{"nome": name, "delta": round(delta, 2)} for delta, name in moves[bottom_start:][::-1]]
+    return result
+
+
+def import_and_regenerate(candidate_path: Path, raw: Path, output: Path, profile: LeagueProfile, giornata: int,
+                          generator: Generator | None = None) -> dict:
+    """Import one matchday's votes, then regenerate — what the GUI's "Applica" does."""
+    written = import_file(candidate_path, raw, profile.season.season, giornata)
+    result = regenerate_with_diff(raw, output, profile, generator=generator)
+    result["giornata"] = giornata
+    result["file_importato"] = str(written)
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Importa una giornata e rigenera le proiezioni.")
     parser.add_argument("--profile", type=Path, required=True)
@@ -60,17 +120,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Importata {path} -> {written}")
     if args.solo_importa:
         return 0
-    dataset = args.output_dir / profile.profile_id / season.replace("/", "-") / "auction_data.json"
-    before = _points(dataset)
-    payload = build_projections(args.raw_dir, args.output_dir, profile=profile)
-    players = payload["players"]
-    observed = max((p["proiezione"].get("giornate_osservate", 0) for p in players), default=0)
-    print(f"Proiezioni rigenerate: {len(players)} giocatori, modello {payload['model_version']}, giornate osservate fino a {observed}")
-    if before:
-        moves = sorted(((p["mercato"]["fp_per_giornata"] - before[p["id"]][1], p["nome"]) for p in players if p["id"] in before), reverse=True)
-        if moves:
-            print("Salgono di più:", ", ".join(f"{name} {delta:+.2f}" for delta, name in moves[:5]))
-            print("Scendono di più:", ", ".join(f"{name} {delta:+.2f}" for delta, name in moves[-5:][::-1]))
+    result = regenerate_with_diff(args.raw_dir, args.output_dir, profile)
+    print(f"Proiezioni rigenerate: {result['giocatori']} giocatori, modello {result['model_version']}, "
+          f"giornate osservate fino a {result['giornate_osservate']}")
+    if result["sale"]:
+        print("Salgono di più:", ", ".join(f"{m['nome']} {m['delta']:+.2f}" for m in result["sale"]))
+        print("Scendono di più:", ", ".join(f"{m['nome']} {m['delta']:+.2f}" for m in result["scende"]))
     if args.verifica:
         from .projection import project_season
         frames = read_matchdays(votes_dir(args.raw_dir, season))

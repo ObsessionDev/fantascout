@@ -28,9 +28,10 @@ def league():
     return LeagueConfig.from_profile(LeagueProfile.load_json(PROFILE_PATH))
 
 
-def _player(player_id: int, role: str, fantavoto: float, probability: float = 0.9, days: int = 3) -> dict:
+def _player(player_id: int, role: str, fantavoto: float, probability: float = 0.9, days: int = 3,
+            squadra: str = "Test") -> dict:
     return {
-        "id": player_id, "nome": f"P{player_id}", "ruolo": role, "squadra": "Test",
+        "id": player_id, "nome": f"P{player_id}", "ruolo": role, "squadra": squadra,
         "p_gioca_per_giornata": [probability] * days,
         "voto_puro_mean_per_giornata": [fantavoto] * days,
         "bonus_atteso_per_giornata": [0.0] * days,
@@ -139,6 +140,35 @@ def test_load_roster_rejects_a_player_missing_from_the_dataset(tmp_path):
     path.write_text('{"giocatori": [{"id": 999}]}', encoding="utf-8")
     with pytest.raises(SystemExit, match="999"):
         load_roster(path, {})
+
+
+def test_rows_carry_no_reasons_without_teams_or_set_pieces(league):
+    roster = _roster(league)
+    report = build_lineup(roster, league, DAY)
+    starter = report.titolari[0]
+    assert starter["avversario"] is None
+    assert starter["trasferta"] is None
+    assert starter["rigorista_priorita"] is None
+    assert starter["incertezza"] == pytest.approx(0.7)
+
+
+def test_rows_carry_opponent_venue_and_penalty_priority_when_given(league):
+    roster = _roster(league)
+    teams = [
+        {"squadra": "Test", "fixtures": [{"matchday": 1, "opponent": "Rivale", "venue": "TRASFERTA"}]},
+        {"squadra": "Rivale", "fixtures": [{"matchday": 1, "opponent": "Test", "venue": "CASA"}]},
+    ]
+    scorer = next(p for p in roster if p["ruolo"] == "A")
+    set_pieces = [{"squadra": "Test", "tipo": "RIGORI", "takers": [{"player_id": scorer["id"], "priorita": 1}]}]
+
+    report = build_lineup(roster, league, DAY, teams=teams, set_pieces=set_pieces)
+    starter = report.titolari[0]
+    assert starter["avversario"] == "Rivale"
+    assert starter["trasferta"] is True
+    scorer_row = next(row for row in report.titolari + report.panchina if row["id"] == scorer["id"])
+    assert scorer_row["rigorista_priorita"] == 1
+    other = next(row for row in report.titolari + report.panchina if row["id"] != scorer["id"])
+    assert other["rigorista_priorita"] is None
 
 
 def test_resolve_unavailable_and_doubtful_match_by_name_or_id(league):

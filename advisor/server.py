@@ -130,6 +130,7 @@ class LocalApiServer(ThreadingHTTPServer):
         datasets_dir: Path | str = Path("data/processed"),
         uploads_dir: Path | str = Path("data/uploads"),
         updates_dir: Path | str = Path("data/updates"),
+        raw_dir: Path | str = Path("data/raw"),
         default_profile_path: Path | str = Path("config/default_profile.json"),
         generator: PipelineGenerator | None = None,
         simulator: SimulationRunner | None = None,
@@ -144,6 +145,7 @@ class LocalApiServer(ThreadingHTTPServer):
         self.datasets_dir = Path(datasets_dir)
         self.uploads_dir = Path(uploads_dir)
         self.updates_dir = Path(updates_dir)
+        self.raw_dir = Path(raw_dir)
         self.default_profile_path = Path(default_profile_path)
         self.generator = generator
         self.simulator = simulator or _simulate_current_dataset
@@ -189,6 +191,8 @@ class LocalApiHandler(BaseHTTPRequestHandler):
         path = self._path()
         if path.startswith("/api/updates/player-list/candidate/"):
             self._put_player_list_candidate(path.removeprefix("/api/updates/player-list/candidate/"))
+        elif path.startswith("/api/updates/matchday/candidate/"):
+            self._put_matchday_candidate(path.removeprefix("/api/updates/matchday/candidate/"))
         elif path.startswith("/api/uploads/"):
             self._put_upload(path.removeprefix("/api/uploads/"))
         elif path.startswith("/api/profiles/"):
@@ -272,6 +276,15 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             return
         if self._path() == "/api/auction/bid":
             self._auction_bid()
+            return
+        if self._path() == "/api/lineup":
+            self._lineup_build()
+            return
+        if self._path() == "/api/matchdays/status":
+            self._matchday_status()
+            return
+        if self._path() == "/api/matchdays/apply":
+            self._apply_matchday()
             return
         if self._path() != "/api/generate":
             self._error(HTTPStatus.NOT_FOUND, "not_found", "The requested endpoint does not exist.")
@@ -455,6 +468,207 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             "informativo": player.get("mercato", {}).get("informativo", True),
             "punti_piano": round(solution.points, 3),
         })
+
+    def _lineup_build(self) -> None:
+        """The XI, ordered bench and the why behind each choice, for one matchday of a roster."""
+        request = self._read_json_object()
+        if request is None:
+            return
+        try:
+            profile = resolve_profile(request, self.server.profiles_dir, profile_loader=self.server.profile_loader)
+        except ProfileRequestError as error:
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_profile", str(error))
+            return
+        dataset_path = (self.server.datasets_dir / profile.profile_id /
+                        profile.season.season.replace("/", "-") / "auction_data.json")
+        try:
+            with dataset_path.open(encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except FileNotFoundError:
+            self._error(HTTPStatus.NOT_FOUND, "dataset_not_found",
+                        "Generate the dataset before asking for a lineup.")
+            return
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError):
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "The dataset is invalid or unreadable.")
+            return
+
+        players_by_id = {int(player["id"]): player for player in payload.get("players") or []}
+        roster_ids = request.get("roster")
+        if (not isinstance(roster_ids, list) or not roster_ids
+                or any(isinstance(entry, bool) or not isinstance(entry, int) for entry in roster_ids)):
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_roster", "roster must be a non-empty array of integer player ids.")
+            return
+        missing = [entry for entry in roster_ids if entry not in players_by_id]
+        if missing:
+            self._error(HTTPStatus.BAD_REQUEST, "unknown_player", f"Unknown player ids in roster: {missing}")
+            return
+        roster = [players_by_id[entry] for entry in roster_ids]
+
+        try:
+            giornata = int(request["giornata"])
+        except (KeyError, TypeError, ValueError):
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_giornata", "giornata is required and must be an integer.")
+            return
+        if giornata < 1:
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_giornata",
+                        "giornata must be a Serie A matchday number, starting at 1.")
+            return
+
+        unavailable_ids = request.get("indisponibili") or []
+        if not isinstance(unavailable_ids, list) or any(
+            isinstance(entry, bool) or not isinstance(entry, int) for entry in unavailable_ids
+        ):
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_unavailable", "indisponibili must be an array of integer player ids.")
+            return
+
+        doubtful_raw = request.get("dubbi") or {}
+        if not isinstance(doubtful_raw, dict):
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_doubtful", "dubbi must be an object mapping player id to probability.")
+            return
+        doubtful: dict[int, float] = {}
+        for key, value in doubtful_raw.items():
+            try:
+                player_id = int(key)
+                probability = float(value)
+            except (TypeError, ValueError):
+                self._error(HTTPStatus.BAD_REQUEST, "invalid_doubtful", f"Invalid entry in dubbi: {key!r}.")
+                return
+            if not 0.0 <= probability <= 1.0:
+                self._error(HTTPStatus.BAD_REQUEST, "invalid_doubtful",
+                            f"Probability out of range [0,1] for player {player_id}.")
+                return
+            doubtful[player_id] = probability
+
+        from .lineup import LineupError, build_lineup
+
+        league = LeagueConfig.from_profile(profile)
+        try:
+            report = build_lineup(
+                roster, league, giornata - 1, unavailable=set(unavailable_ids), doubtful=doubtful,
+                teams=payload.get("teams"), set_pieces=payload.get("set_pieces"),
+            )
+        except LineupError as error:
+            self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "lineup_impossible", str(error))
+            return
+        self._send_json(HTTPStatus.OK, report.to_dict())
+
+    def _matchday_status(self) -> None:
+        """Which Serie A matchdays of the league window are already in the model."""
+        value = self._read_json_object()
+        if value is None:
+            return
+        try:
+            profile = resolve_profile(value, self.server.profiles_dir, profile_loader=self.server.profile_loader)
+        except ProfileRequestError as error:
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_profile", str(error))
+            return
+        from .inseason import read_matchdays, votes_dir
+
+        season = profile.season.season
+        try:
+            frames = read_matchdays(votes_dir(self.server.raw_dir, season))
+        except (OSError, ValueError) as error:
+            self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "invalid_source_data", str(error))
+            return
+        imported = sorted(int(frame.giornata.iloc[0]) for frame in frames)
+        start, end = profile.season.fantasy_start_matchday, profile.season.fantasy_end_matchday
+        missing = [giornata for giornata in range(start, end + 1) if giornata not in imported]
+        self._send_json(HTTPStatus.OK, {
+            "stagione": season,
+            "prima_giornata": start,
+            "ultima_giornata": end,
+            "giornate_importate": imported,
+            "giornate_mancanti": missing,
+        })
+
+    def _put_matchday_candidate(self, relative_path: str) -> None:
+        """Stage a matchday's votes file for review; nothing is applied yet."""
+        parts = relative_path.split("/")
+        if len(parts) != 2 or not PROFILE_NAME.fullmatch(parts[0]) or not parts[1].isdigit():
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_candidate_path",
+                        "Candidate paths must identify a profile and a matchday number.")
+            return
+        profile_id, giornata_text = parts
+        giornata = int(giornata_text)
+        if not 1 <= giornata <= 38:
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_giornata", "giornata must be between 1 and 38.")
+            return
+        filename = self.headers.get("X-Filename", "")
+        suffix = Path(filename).suffix.lower()
+        if suffix not in {".csv", ".xlsx", ".xls"}:
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_upload_type", "Upload a .csv or .xlsx file.")
+            return
+        try:
+            content_length = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            content_length = -1
+        if content_length < 1 or content_length > MAX_UPLOAD_BYTES:
+            self._error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "invalid_upload_size",
+                        "Upload size must be between 1 byte and 50 MB.")
+            return
+        body = self.rfile.read(content_length)
+        target_dir = self.server.uploads_dir / profile_id / "matchdays"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for stale in target_dir.glob(f"giornata_{giornata:02d}.*"):
+            stale.unlink(missing_ok=True)
+        target = target_dir / f"giornata_{giornata:02d}{suffix}"
+        target.write_bytes(body)
+        from .aggiorna import parse_matchday_file
+
+        try:
+            frame = parse_matchday_file(target, giornata)
+        except (ValueError, KeyError, OSError, UnicodeDecodeError, BadZipFile) as error:
+            target.unlink(missing_ok=True)
+            self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "invalid_matchday_file", str(error))
+            return
+        self._send_json(HTTPStatus.OK, {
+            "giornata": giornata,
+            "filename": Path(filename).name,
+            "righe": int(len(frame)),
+            "squadre": int(frame.squadra.nunique()),
+            "senza_voto": int(frame.voto.isna().sum()),
+        })
+
+    def _apply_matchday(self) -> None:
+        """Import the staged candidate for a matchday, then regenerate — the explicit confirm step."""
+        request = self._read_json_object()
+        if request is None:
+            return
+        try:
+            profile = resolve_profile(request, self.server.profiles_dir, profile_loader=self.server.profile_loader)
+        except ProfileRequestError as error:
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_profile", str(error))
+            return
+        try:
+            giornata = int(request["giornata"])
+        except (KeyError, TypeError, ValueError):
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_giornata", "giornata is required and must be an integer.")
+            return
+        candidate_dir = self.server.uploads_dir / profile.profile_id / "matchdays"
+        candidate = next(
+            (path for path in sorted(candidate_dir.glob(f"giornata_{giornata:02d}.*")) if path.is_file()),
+            None,
+        ) if candidate_dir.is_dir() else None
+        if candidate is None:
+            self._error(HTTPStatus.NOT_FOUND, "candidate_not_found", "Carica prima il file di questa giornata.")
+            return
+        from .aggiorna import import_and_regenerate
+
+        try:
+            with profile_transaction(self.server.updates_dir, profile.profile_id):
+                result = import_and_regenerate(
+                    candidate, self.server.raw_dir, self.server.datasets_dir, profile, giornata,
+                    generator=self.server.generator,
+                )
+        except (ValueError, KeyError, OSError, UnicodeDecodeError, BadZipFile) as error:
+            self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "invalid_source_data", str(error))
+            return
+        except Exception:
+            traceback.print_exc(file=sys.stderr)
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "generation_failed", "Generation failed.")
+            return
+        candidate.unlink(missing_ok=True)
+        self._send_json(HTTPStatus.OK, result)
 
     def _simulate(self) -> None:
         request = self._read_json_object()
@@ -1235,6 +1449,7 @@ def create_server(
     datasets_dir: Path | str = Path("data/processed"),
     uploads_dir: Path | str = Path("data/uploads"),
     updates_dir: Path | str = Path("data/updates"),
+    raw_dir: Path | str = Path("data/raw"),
     default_profile_path: Path | str = Path("config/default_profile.json"),
     generator: PipelineGenerator | None = None,
     simulator: SimulationRunner | None = None,
@@ -1246,7 +1461,7 @@ def create_server(
     player_list_fetcher: PlayerListFetchPage = fetch_public_page,
 ) -> LocalApiServer:
     """Create a local API server; inject a pipeline generator for tests or embedding."""
-    return LocalApiServer(address, profiles_dir=profiles_dir, datasets_dir=datasets_dir, uploads_dir=uploads_dir, updates_dir=updates_dir, default_profile_path=default_profile_path, generator=generator, simulator=simulator, profile_loader=profile_loader, update_fetcher=update_fetcher, formations_fetcher=formations_fetcher, set_piece_fetcher=set_piece_fetcher, goalkeeper_fetcher=goalkeeper_fetcher, player_list_fetcher=player_list_fetcher)
+    return LocalApiServer(address, profiles_dir=profiles_dir, datasets_dir=datasets_dir, uploads_dir=uploads_dir, updates_dir=updates_dir, raw_dir=raw_dir, default_profile_path=default_profile_path, generator=generator, simulator=simulator, profile_loader=profile_loader, update_fetcher=update_fetcher, formations_fetcher=formations_fetcher, set_piece_fetcher=set_piece_fetcher, goalkeeper_fetcher=goalkeeper_fetcher, player_list_fetcher=player_list_fetcher)
 
 
 def _simulate_current_dataset(profile: Any, output_dir: Path, iterations: int, seed: int, rosters: dict[str, list[int]] | None = None) -> dict[str, Any]:
@@ -1265,8 +1480,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--datasets-dir", type=Path, default=Path("data/processed"))
     parser.add_argument("--uploads-dir", type=Path, default=Path("data/uploads"))
     parser.add_argument("--updates-dir", type=Path, default=Path("data/updates"))
+    parser.add_argument("--raw-dir", type=Path, default=Path("data/raw"))
     args = parser.parse_args(argv)
-    server = create_server((args.host, args.port), profiles_dir=args.profiles_dir, datasets_dir=args.datasets_dir, uploads_dir=args.uploads_dir, updates_dir=args.updates_dir)
+    server = create_server((args.host, args.port), profiles_dir=args.profiles_dir, datasets_dir=args.datasets_dir, uploads_dir=args.uploads_dir, updates_dir=args.updates_dir, raw_dir=args.raw_dir)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

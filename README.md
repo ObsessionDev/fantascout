@@ -149,12 +149,19 @@ called is far cheaper than pricing a whole role in advance.
 
 ## Matchday Lineup (fork)
 
-The auction is one event; the season is thirty-six matchdays, and `advisor.lineup`
-answers the question asked every one of them: who to field, given the roster the
-auction produced. It reuses the auction's own model — `optimize.best_lineup`,
-which is `optimize.lineup_value` with the winning selection kept instead of
-discarded — restricted to a single matchday's own numbers instead of the
-season means.
+The auction is one event; the season is thirty-six matchdays, and the
+dashboard's **Formazione** tab answers the question asked every one of them:
+who to field, given the roster the auction produced. It reuses the auction's
+own model — `optimize.best_lineup`, which is `optimize.lineup_value` with the
+winning selection kept instead of discarded — restricted to a single
+matchday's own numbers instead of the season means. The tab starts from the
+roster in the browser's own auction, or an uploaded export, lets Mattia mark
+injuries and doubts, and shows the XI, the ordered bench and, for every
+starter, the opponent, home/away, the uncertainty on his projection and
+whether he is the designated penalty taker — then a free-form comparison
+against the XI Mattia would have picked himself. `advisor.lineup` remains the
+CLI the tab's `POST /api/lineup` endpoint is built on, useful for a one-off
+check without the browser:
 
 **Exporting the roster.** The live auction is the only place the purchased
 roster exists, in the browser's own storage (`web/src/auction-store.js`). The
@@ -223,8 +230,14 @@ season with no information from the future:
 ```
 
 During the season every matchday played updates the projections. Drop a
-season-to-date `data/raw/statistiche_<season>.xlsx`, or import matchday votes,
-then regenerate:
+season-to-date `data/raw/statistiche_<season>.xlsx` for the whole-season path,
+or bring in one matchday's votes from **Aggiornamenti → Giornate giocate** in
+the dashboard: it shows which Serie A matchdays are already in the model and
+which are missing, accepts the votes file downloaded by hand from
+Fantacalcio.it (their terms forbid automated reading — the GUI only accepts
+the file, it never fetches it), previews the parsed rows, and regenerates
+only after an explicit confirmation, same as every other update source on
+that page. The equivalent from the terminal:
 
 ```bash
 .venv/bin/python -m advisor.aggiorna --profile config/profiles/lega-2026-27.json \

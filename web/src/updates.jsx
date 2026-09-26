@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  applyMatchday,
+  getMatchdayStatus,
+  LineupClientError,
+  uploadMatchdayCandidate,
+} from "./lineup-client.js";
+import {
   acceptSosFanta,
   acceptSosFantaFormations,
   acceptSosFantaSetPieces,
@@ -640,11 +646,165 @@ function GoalkeeperUpdates({ profile, apiBase }) {
   );
 }
 
+function MatchdayUpdates({ profile, apiBase, onApplied }) {
+  const [status, setStatus] = useState(null);
+  const [giornata, setGiornata] = useState("");
+  const [candidate, setCandidate] = useState(null);
+  const [busy, setBusy] = useState("");
+  const [message, setMessage] = useState("");
+  const [problem, setProblem] = useState("");
+  const sequence = useRef(0);
+  const season = profile?.season?.season;
+
+  const refreshStatus = async () => {
+    const request = ++sequence.current;
+    try {
+      const next = await getMatchdayStatus(profile, { apiBase });
+      if (request !== sequence.current) return;
+      setStatus(next);
+      setGiornata((current) => current || String(next.giornate_mancanti?.[0] || next.prima_giornata || ""));
+    } catch {
+      /* The card explains the failure the next time an action is taken. */
+    }
+  };
+
+  useEffect(() => {
+    setStatus(null);
+    setCandidate(null);
+    setGiornata("");
+    setMessage("");
+    setProblem("");
+    refreshStatus();
+  }, [apiBase, profile?.profile_id, season]);
+
+  const upload = async (file) => {
+    if (!file || !giornata) return;
+    const request = ++sequence.current;
+    setBusy("upload");
+    setMessage("");
+    setProblem("");
+    try {
+      const preview = await uploadMatchdayCandidate(file, profile.profile_id, Number(giornata), { apiBase });
+      if (request !== sequence.current) return;
+      setCandidate({ ...preview, filename: preview.filename || file.name });
+      setMessage(`File verificato: ${preview.righe} righe, ${preview.squadre} squadre, ${preview.senza_voto} senza voto.`);
+    } catch (error) {
+      if (request !== sequence.current) return;
+      setCandidate(null);
+      setProblem(error?.code || "request_failed");
+      setMessage(error instanceof LineupClientError || error instanceof Error ? error.message : "File non valido.");
+    } finally {
+      if (request === sequence.current) setBusy("");
+    }
+  };
+
+  const apply = async () => {
+    const request = ++sequence.current;
+    setBusy("apply");
+    setMessage("");
+    setProblem("");
+    try {
+      const result = await applyMatchday(profile, Number(giornata), { apiBase });
+      if (request !== sequence.current) return;
+      setCandidate(null);
+      setMessage(
+        `Giornata ${result.giornata} importata: ${result.giocatori} giocatori, modello ${result.model_version}, ` +
+        `giornate osservate fino a ${result.giornate_osservate}.` +
+        (result.sale?.length ? ` Salgono di più: ${result.sale.map((m) => `${m.nome} ${m.delta > 0 ? "+" : ""}${m.delta}`).join(", ")}.` : "") +
+        (result.scende?.length ? ` Scendono di più: ${result.scende.map((m) => `${m.nome} ${m.delta}`).join(", ")}.` : ""),
+      );
+      await refreshStatus();
+      if (onApplied) await onApplied();
+    } catch (error) {
+      if (request !== sequence.current) return;
+      setProblem(error?.code || "request_failed");
+      setMessage(error instanceof Error ? error.message : "Applicazione non riuscita.");
+    } finally {
+      if (request === sequence.current) setBusy("");
+    }
+  };
+
+  const imported = status?.giornate_importate || [];
+  const missing = status?.giornate_mancanti || [];
+
+  return (
+    <article className="update-source-card">
+      <header>
+        <div>
+          <span className="source-index">06</span>
+          <h2>Giornate giocate</h2>
+        </div>
+        <span className={`update-state ${missing.length ? "changed" : imported.length ? "unchanged" : "idle"}`}>
+          {status ? `${imported.length}/${imported.length + missing.length} nel modello` : "Non ancora verificato"}
+        </span>
+      </header>
+
+      <div className="update-source-meta">
+        <div><span>Stagione</span><strong>{season}</strong></div>
+        <div><span>Ambito</span><strong>Voti per giornata (advisor.aggiorna)</strong></div>
+        <div><span>Finestra lega</span><strong>{status ? `${status.prima_giornata}ª – ${status.ultima_giornata}ª` : "-"}</strong></div>
+      </div>
+
+      <p className="accept-warning">
+        I voti di Fantacalcio.it si scaricano a mano (i loro termini vietano la lettura automatica): scarica il file
+        della giornata dal sito con cui gioca la lega, poi caricalo qui.
+      </p>
+
+      {missing.length > 0 && (
+        <p className="micro">Mancano ancora: {missing.join(", ")}.</p>
+      )}
+
+      <div className="update-actions">
+        <label className="field" style={{ maxWidth: "10rem" }}>
+          <span className="field-label">Giornata</span>
+          <input
+            type="number"
+            className="input"
+            min={1}
+            max={38}
+            value={giornata}
+            onChange={(event) => {
+              setGiornata(event.target.value);
+              setCandidate(null);
+            }}
+          />
+        </label>
+        <label className={`update-file-button${busy ? " disabled" : ""}`}>
+          {busy === "upload" ? "Verifica file..." : "Carica file giornata (.csv o .xlsx)"}
+          <input
+            type="file"
+            accept=".csv,.xlsx"
+            disabled={Boolean(busy) || !giornata}
+            onChange={(event) => {
+              upload(event.target.files?.[0]);
+              event.target.value = "";
+            }}
+          />
+        </label>
+        {candidate && (
+          <button className="update-apply-button" onClick={apply} disabled={Boolean(busy)}>
+            {busy === "apply" ? "Importazione in corso..." : "Applica e rigenera"}
+          </button>
+        )}
+      </div>
+
+      {candidate && (
+        <p className="accept-warning">
+          Confermi di importare <code>{candidate.filename}</code> come giornata {candidate.giornata}? Il dataset
+          verrà rigenerato subito dopo.
+        </p>
+      )}
+      {message && <p className={`update-message ${problem ? "error" : ""}`} role={problem ? "alert" : "status"}>{message}</p>}
+    </article>
+  );
+}
+
 export function Updates({
   profile,
   apiBase = "",
   onPlayerListApplyStart,
   onPlayerListApplied,
+  onMatchdayApplied,
 }) {
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState("");
@@ -813,6 +973,8 @@ export function Updates({
       <SetPieceUpdates profile={profile} apiBase={apiBase} />
 
       <GoalkeeperUpdates profile={profile} apiBase={apiBase} />
+
+      <MatchdayUpdates profile={profile} apiBase={apiBase} onApplied={onMatchdayApplied} />
 
       <PlayerListUpdates
         profile={profile}

@@ -30,6 +30,7 @@ import PlayersView from "./views/players.jsx";
 import TeamsView, { SetPiecesView } from "./views/teams.jsx";
 import SimulationView from "./views/simulation.jsx";
 import AuctionView from "./views/auction.jsx";
+import LineupView from "./views/lineup.jsx";
 
 const TABS = [
   {
@@ -59,6 +60,12 @@ const TABS = [
       ["teams", "Squadre"],
       ["setpieces", "Piazzati"],
     ],
+  },
+  {
+    id: "formazione",
+    label: "Formazione",
+    icon: "calendar",
+    views: [["lineup", "Formazione"]],
   },
   {
     id: "simulation",
@@ -630,6 +637,20 @@ function App() {
       },
     });
 
+  const reloadDatasetAfterMatchdayApply = async () => {
+    if (!profile) return;
+    const request = latestProfileRequest();
+    try {
+      const nextData = await loadDatasetUrl(
+        apiUrl(`/api/datasets/${auctionDatasetPath(profile)}`, apiBase),
+        { profile },
+      );
+      if (isCurrentProfileRequest(request)) applyDataset(nextData, profile);
+    } catch {
+      /* The matchday card already reports its own failure; the old dataset stays visible. */
+    }
+  };
+
   const rerunSimulation = async ({ rosterMode = "sample", rosters = null } = {}) => {
     if (isSimulating) return;
     const request = latestProfileRequest();
@@ -813,12 +834,22 @@ function App() {
               apiBase={apiBase}
             />
           ) : null}
+          {view === "lineup" ? (
+            <LineupView
+              data={data}
+              profile={dataset?.profile ?? profile}
+              profileId={activeProfileId}
+              rules={activeRules}
+              apiBase={apiBase}
+            />
+          ) : null}
           {view === "updates" ? (
             <Updates
               profile={profile}
               apiBase={apiBase}
               onPlayerListApplyStart={beginPlayerListUpdate}
               onPlayerListApplied={adoptPlayerListUpdate}
+              onMatchdayApplied={reloadDatasetAfterMatchdayApply}
             />
           ) : null}
           {view === "settings" ? (
