@@ -305,12 +305,40 @@ def _choose_lineup(available: list[dict[str, Any]], league: LeagueConfig) -> lis
     return best
 
 
-def _draw_outcome(player: dict[str, Any], day_index: int, rng: np.random.Generator, team_factor: float) -> dict[str, Any]:
-    probability = player["p_gioca_per_giornata"][day_index]
+def _season_levels(players: list[dict[str, Any]], rng: np.random.Generator) -> dict[int, tuple[float, float, float]]:
+    """One season's worth of luck per player: how far his level sits from the projection.
+
+    A projection is a mean, and a player's true season strays from it by a
+    measured amount (`proiezione.incertezza`, see MODEL.md): the vote level,
+    the bonus level and the share of matchdays he plays all move together for
+    a whole season. Drawing them once per iteration, instead of treating every
+    matchday as independent, is what makes the spread of season scores
+    honest. Players without the measured spread keep the old behaviour, and
+    draw nothing, so seeded results of older datasets are unchanged.
+    """
+    levels = {}
+    for player in players:
+        spread = player.get("proiezione", {}).get("incertezza")
+        if not spread:
+            continue
+        vote_sd = float(spread.get("sd_livello_voto", 0))
+        bonus_sd = float(np.sqrt(max(float(spread.get("sd_livello_fantavoto", 0)) ** 2 - vote_sd ** 2, 0)))
+        chances = player.get("p_gioca_per_giornata") or [player.get("proiezione", {}).get("p_gioca", 0)]
+        mean = float(np.clip(np.mean(chances), 1e-3, 1 - 1e-3))
+        kappa = float(spread.get("concentrazione_presenza", 0))
+        share = float(rng.beta(mean * kappa, (1 - mean) * kappa)) / mean if kappa > 0 else 1.0
+        levels[int(player["id"])] = (float(rng.normal(0, vote_sd)), float(rng.normal(0, bonus_sd)), share)
+    return levels
+
+
+def _draw_outcome(player: dict[str, Any], day_index: int, rng: np.random.Generator, team_factor: float, level: tuple[float, float, float] | None = None) -> dict[str, Any]:
+    vote_shift, bonus_shift, share = level or (0.0, 0.0, 1.0)
+    probability = min(1.0, player["p_gioca_per_giornata"][day_index] * share)
     outcome = {"id": player["id"], "ruolo": player["ruolo"], "selection_value": probability * (player["voto_puro_mean_per_giornata"][day_index] + player["bonus_atteso_per_giornata"][day_index]), "plays": bool(rng.random() < probability)}
     if not outcome["plays"]:
         return outcome
-    pure_vote = float(np.clip(rng.normal(player["voto_puro_mean_per_giornata"][day_index] + team_factor, player["voto_puro_std_per_giornata"][day_index]), 4, 10))
+    pure_vote = float(np.clip(rng.normal(player["voto_puro_mean_per_giornata"][day_index] + team_factor + vote_shift, player["voto_puro_std_per_giornata"][day_index]), 4, 10))
+    outcome["bonus_shift"] = bonus_shift
     rates = player.get("event_rates", {})
     goals = rng.poisson(max(0, rates.get("gol", 0)))
     assists = rng.poisson(max(0, rates.get("assist", 0)))
@@ -318,6 +346,10 @@ def _draw_outcome(player: dict[str, Any], day_index: int, rng: np.random.Generat
     red = rng.poisson(max(0, rates.get("espulsioni", 0)))
     own_goals = rng.poisson(max(0, rates.get("autogol", 0)))
     conceded = rng.poisson(max(0, rates.get("gol_subiti", 0))) if player["ruolo"] == "P" else 0
+    # Drawn only when the dataset carries them, so older datasets keep their seeded draws.
+    saved = rng.poisson(max(0, rates["rigori_parati"])) if "rigori_parati" in rates else 0
+    missed = rng.poisson(max(0, rates["rigori_sbagliati"])) if "rigori_sbagliati" in rates else 0
+    outcome["penalties"] = (saved, missed)
     outcome.update({"pure": pure_vote, "events": (goals, assists, yellow, red, own_goals, conceded), "fantavote": pure_vote + goals * 3 + assists - yellow * .5 - red - own_goals * 2 - conceded, "selection_value": pure_vote + player["bonus_atteso_per_giornata"][day_index]})
     return outcome
 
@@ -333,11 +365,15 @@ def _series_a_factors(payload: dict[str, Any], serie_day: int, rng: np.random.Ge
     return factors
 
 
-def _team_score(roster: list[int], players: dict[int, dict[str, Any]], day_index: int, factors: dict[str, float], rng: np.random.Generator, league: LeagueConfig) -> tuple[float, list[dict[str, Any]]]:
+def _team_score(roster: list[int], players: dict[int, dict[str, Any]], day_index: int, factors: dict[str, float], rng: np.random.Generator, league: LeagueConfig, levels: dict[int, tuple[float, float, float]] | None = None) -> tuple[float, list[dict[str, Any]]]:
     pre_lineup = []
+    levels = levels or {}
     for player_id in roster:
         player = players[player_id]
-        probability = player["p_gioca_per_giornata"][day_index]
+        # The manager knows who has lost his place or is out for months, so
+        # the lineup is picked on the player's season, not on the projection.
+        share = levels.get(int(player_id), (0.0, 0.0, 1.0))[2]
+        probability = min(1.0, player["p_gioca_per_giornata"][day_index] * share)
         pre_lineup.append({
             "id": player_id,
             "ruolo": player["ruolo"],
@@ -358,11 +394,17 @@ def _team_score(roster: list[int], players: dict[int, dict[str, Any]], day_index
             reverse=True,
         )[:limit]
     ]
-    drawn = {player_id: _draw_outcome(players[player_id], day_index, rng, factors.get(players[player_id]["squadra"], 0)) for player_id in roster}
+    drawn = {}
+    for player_id in roster:
+        level = levels.get(int(player_id))
+        arguments = (players[player_id], day_index, rng, factors.get(players[player_id]["squadra"], 0))
+        drawn[player_id] = _draw_outcome(*arguments, level) if level is not None else _draw_outcome(*arguments)
     for outcome in drawn.values():
         if "events" in outcome:
             goals, assists, yellow, red, own_goals, conceded = outcome["events"]
-            outcome["fantavote"] = outcome["pure"] + goals * league.scoring_goal + assists * league.scoring_assist + yellow * league.scoring_yellow_card + red * league.scoring_red_card + own_goals * league.scoring_own_goal + conceded * league.scoring_goalkeeper_conceded_goal
+            saved, missed = outcome.get("penalties", (0, 0))
+            clean_sheet = league.scoring_clean_sheet if outcome["ruolo"] == "P" and conceded == 0 else 0.0
+            outcome["fantavote"] = outcome["pure"] + goals * league.scoring_goal + assists * league.scoring_assist + yellow * league.scoring_yellow_card + red * league.scoring_red_card + own_goals * league.scoring_own_goal + conceded * league.scoring_goalkeeper_conceded_goal + saved * league.scoring_penalty_saved + missed * league.scoring_penalty_missed + clean_sheet + outcome.get("bonus_shift", 0.0)
     playing_starters = [drawn[player["id"]] for player in starters if drawn[player["id"]]["plays"]]
     replacements = []
     if league.switch_mode == "None":
@@ -468,12 +510,13 @@ def simulate_season(payload: dict[str, Any], rosters: dict[str, list[int]], iter
         goals_against = {name: 0 for name in names}
         direct_points = {name: {opponent: 0 for opponent in names if opponent != name} for name in names}
         season_scores = {name: 0.0 for name in names}
+        levels = _season_levels([players[player_id] for roster in rosters.values() for player_id in roster], rng)
         for league_day in sorted(fixtures_by_day):
             serie_day = int(fixtures_by_day[league_day][0]["serie_a_matchday"])
             factors = _series_a_factors(payload, serie_day, rng)
             scores, lineups = {}, {}
             for name in names:
-                scores[name], lineups[name] = _team_score(rosters[name], players, serie_day - 1, factors, rng, league)
+                scores[name], lineups[name] = _team_score(rosters[name], players, serie_day - 1, factors, rng, league, levels)
             for fixture in fixtures_by_day[league_day]:
                 home, away = fixture["home_team"], fixture["away_team"]
                 home_goals, away_goals = _goals(scores[home], league), _goals(scores[away], league)

@@ -14,6 +14,10 @@ class ModelConfig:
     # log(1 + FVM) instead of from zero. See fit_rate_priors in pipeline.py.
     impute_missing_history: bool = True
     rate_prior_min_samples: int = 12
+    # "motore": advisor.engine, trained on every historical season in the raw
+    # directory and updated with the matchdays played. "legacy": the fixed
+    # weights above. The engine falls back to legacy when history is too thin.
+    engine: str = "motore"
 
     def __post_init__(self):
         if self.default_std is None:
@@ -51,6 +55,9 @@ class LeagueConfig:
     scoring_red_card: float = -1
     scoring_own_goal: float = -2
     scoring_goalkeeper_conceded_goal: float = -1
+    scoring_penalty_saved: float = 0
+    scoring_penalty_missed: float = 0
+    scoring_clean_sheet: float = 0
     defense_required_defenders: int = 4
     defense_tiers: tuple[tuple[float, float], ...] = ((6.0, 1), (6.5, 2), (7.0, 3))
     win_points: int = 3
@@ -97,6 +104,9 @@ class LeagueConfig:
             scoring_red_card=profile.scoring.red_card,
             scoring_own_goal=profile.scoring.own_goal,
             scoring_goalkeeper_conceded_goal=profile.scoring.goalkeeper_conceded_goal,
+            scoring_penalty_saved=profile.scoring.penalty_saved,
+            scoring_penalty_missed=profile.scoring.penalty_missed,
+            scoring_clean_sheet=profile.scoring.clean_sheet,
             win_points=profile.standings.win_points,
             draw_points=profile.standings.draw_points,
             loss_points=profile.standings.loss_points,
@@ -108,6 +118,15 @@ class LeagueConfig:
             bid_increment=profile.auction.bid_increment,
             reserve_credits_per_open_slot=profile.auction.reserve_credits_per_open_slot,
         )
+
+    @property
+    def scoring(self) -> dict[str, float]:
+        """Scoring values keyed as in the profile, for the projection engine."""
+        return {"goal": self.scoring_goal, "assist": self.scoring_assist, "yellow_card": self.scoring_yellow_card,
+                "red_card": self.scoring_red_card, "own_goal": self.scoring_own_goal,
+                "goalkeeper_conceded_goal": self.scoring_goalkeeper_conceded_goal,
+                "penalty_saved": self.scoring_penalty_saved, "penalty_missed": self.scoring_penalty_missed,
+                "clean_sheet": self.scoring_clean_sheet}
 
     @property
     def roster_size(self) -> int:
