@@ -47,6 +47,9 @@ cd web
 npm run dev
 ```
 
+Or start both, detached, with `./avvia.sh start` (`stop` and `status` too; logs and pid files in
+`~/.local/state/fantascout`).
+
 Open http://127.0.0.1:8442. On first launch the application opens **Impostazioni**.
 The included sources are enough to use **Genera dati** for the dashboard,
 projections, and auction tools. Upload a compatible private
