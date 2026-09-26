@@ -367,9 +367,13 @@ def _series_a_factors(payload: dict[str, Any], serie_day: int, rng: np.random.Ge
 
 def _team_score(roster: list[int], players: dict[int, dict[str, Any]], day_index: int, factors: dict[str, float], rng: np.random.Generator, league: LeagueConfig, levels: dict[int, tuple[float, float, float]] | None = None) -> tuple[float, list[dict[str, Any]]]:
     pre_lineup = []
+    levels = levels or {}
     for player_id in roster:
         player = players[player_id]
-        probability = player["p_gioca_per_giornata"][day_index]
+        # The manager knows who has lost his place or is out for months, so
+        # the lineup is picked on the player's season, not on the projection.
+        share = levels.get(int(player_id), (0.0, 0.0, 1.0))[2]
+        probability = min(1.0, player["p_gioca_per_giornata"][day_index] * share)
         pre_lineup.append({
             "id": player_id,
             "ruolo": player["ruolo"],
@@ -390,7 +394,6 @@ def _team_score(roster: list[int], players: dict[int, dict[str, Any]], day_index
             reverse=True,
         )[:limit]
     ]
-    levels = levels or {}
     drawn = {}
     for player_id in roster:
         level = levels.get(int(player_id))
