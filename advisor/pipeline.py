@@ -19,6 +19,7 @@ from .config import LeagueConfig, ModelConfig
 from .league_calendar import preprocess_legacy_calendar, validate_calendar
 from .league_profile import LeagueProfile
 from .freshness import dataset_configuration_hash, dataset_input_hash, source_fingerprints
+from .projection import project_season
 
 RAW = Path("data/raw")
 PROCESSED = Path("data/processed")
@@ -677,6 +678,10 @@ def build_projections(raw: Path = RAW, output: Path = PROCESSED, config: ModelCo
         if away_team in fixtures_by_team:
             fixtures_by_team[away_team][matchday] = {"team_id": normalize(away_team), "matchday": matchday, "date": str(match.match_date)[:10], "opponent": home_team, "opponent_team_id": normalize(home_team), "venue": "TRASFERTA"}
     rate_priors = fit_rate_priors(listone, histories, config) if config.impute_missing_history else {}
+    engine_result = None
+    if config.engine == "motore" and profile is not None:
+        engine_result = project_season(raw, listone, profile.season.season, league.scoring, config.season_days, calendar)
+    engine_projection = engine_result[0] if engine_result else None
     players = []
     for _, player in listone.iterrows():
         guide_entry = guide[guide.id_fantacalcio == player.Id]
@@ -686,7 +691,11 @@ def build_projections(raw: Path = RAW, output: Path = PROCESSED, config: ModelCo
         team = team.iloc[0]
         starter_entry = starter_status[starter_status.id_matched == player.Id]
         status = starter_entry.status
-        historical_p_play = weighted_history(int(player.Id), histories, "Pv", np.nan, config.history_weights) / 38
+        projected = engine_projection.loc[int(player.Id)] if engine_projection is not None and int(player.Id) in engine_projection.index else None
+        if projected is not None:
+            historical_p_play = float(projected.p_play)
+        else:
+            historical_p_play = weighted_history(int(player.Id), histories, "Pv", np.nan, config.history_weights) / 38
         if not status.empty:
             status_p_play = {"TITOLARE": .85, "BALLOTTAGGIO": .55, "RISERVA": .15}.get(status.iloc[0], .30)
             p_play = status_p_play if np.isnan(historical_p_play) else .65 * status_p_play + .35 * historical_p_play
@@ -698,18 +707,25 @@ def build_projections(raw: Path = RAW, output: Path = PROCESSED, config: ModelCo
         if player.R != "P" and pd.notna(team.coppa_europea) and str(team.coppa_europea).strip():
             p_play *= config.european_rotation_discount
         p_play = float(np.clip(p_play, .05, .95))
-        team_prior = (float(team.rating_att) - 5.5) * .045
-        mv = weighted_history(int(player.Id), histories, "Mv", 6.0 + team_prior, config.history_weights)
-        std = vote_standard_deviation(int(player.Id), histories, config.default_std[player.R])
-        # 75 minutes per rated appearance is the documented approximation.
-        # A player with no rated history would otherwise take zero for every rate,
-        # which is not a neutral value: it inflates goalkeepers and defenders and
-        # deflates midfielders and forwards. Fall back to the fitted market prior.
-        rates_imputed = bool(rate_priors) and not has_rated_history(int(player.Id), histories)
-        if rates_imputed:
-            per90 = lambda col: imputed_rate(rate_priors, player.R, col, float(player.FVM))
+        if projected is not None:
+            # Engine: rates are per rated appearance, as the fantasy vote counts them.
+            mv = float(projected.mv)
+            std = float(np.sqrt(projected.mv_sigma2))
+            rates_imputed = bool(projected.new > 0)
+            per90 = lambda col: float(projected[f"rate_{col}"])
         else:
-            per90 = lambda col: weighted_rate_per_appearance(int(player.Id), histories, col, config.history_weights)
+            team_prior = (float(team.rating_att) - 5.5) * .045
+            mv = weighted_history(int(player.Id), histories, "Mv", 6.0 + team_prior, config.history_weights)
+            std = vote_standard_deviation(int(player.Id), histories, config.default_std[player.R])
+            # 75 minutes per rated appearance is the documented approximation.
+            # A player with no rated history would otherwise take zero for every rate,
+            # which is not a neutral value: it inflates goalkeepers and defenders and
+            # deflates midfielders and forwards. Fall back to the fitted market prior.
+            rates_imputed = bool(rate_priors) and not has_rated_history(int(player.Id), histories)
+            if rates_imputed:
+                per90 = lambda col: imputed_rate(rate_priors, player.R, col, float(player.FVM))
+            else:
+                per90 = lambda col: weighted_rate_per_appearance(int(player.Id), histories, col, config.history_weights)
         goal, assist = per90("Gf"), per90("Ass")
         yellow, red, autogoal = per90("Amm"), per90("Esp"), per90("Au")
         malus = yellow * -league.scoring_yellow_card + red * -league.scoring_red_card + autogoal * -league.scoring_own_goal
@@ -718,12 +734,33 @@ def build_projections(raw: Path = RAW, output: Path = PROCESSED, config: ModelCo
             goal += .12  # Expected penalty goals per 90 for the primary taker.
         conceded = per90("Gs") if player.R == "P" else 0.0
         bonus = goal * league.scoring_goal + assist * league.scoring_assist - malus + conceded * league.scoring_goalkeeper_conceded_goal
+        penalties_saved = per90("Rp") if projected is not None and player.R == "P" else 0.0
+        penalties_missed = per90("R-") if projected is not None else 0.0
+        # A clean sheet is a matchday with no goal conceded; with goals conceded
+        # per appearance Poisson, its probability is exp(-rate). Not in the
+        # historical files, so this term is modelled and not measured.
+        clean_sheet = float(np.exp(-conceded)) if player.R == "P" and league.scoring_clean_sheet else 0.0
+        bonus += penalties_saved * league.scoring_penalty_saved + penalties_missed * league.scoring_penalty_missed + clean_sheet * league.scoring_clean_sheet
         historical = {}
         for season, frame in history_entries:
             rows = frame[frame.Id == player.Id]
             if not rows.empty:
                 historical[season] = _clean_record(rows.iloc[0][["Pv", "Mv", "Fm", "Gf", "Gs", "Rp", "Rc", "R+", "R-", "Ass", "Amm", "Esp", "Au"]].to_dict())
         event_rates = {"gol": round(goal, 4), "assist": round(assist, 4), "ammonizioni": round(yellow, 4), "espulsioni": round(red, 4), "autogol": round(autogoal, 4), "gol_subiti": round(conceded, 4)}
+        if projected is not None:
+            event_rates.update({"rigori_parati": round(penalties_saved, 4), "rigori_sbagliati": round(penalties_missed, 4)})
+        source = ("prior_fvm" if rates_imputed else "storico") if projected is None else ("avvio_freddo" if rates_imputed else "storico")
+        projection_extra = {} if projected is None else {
+            "motore": "bayes",
+            "giornate_osservate": int(projected.giornate_osservate),
+            "presenze_osservate": round(float(projected.presenze_osservate), 2),
+            "incertezza": {
+                "sd_livello_voto": round(float(np.sqrt(projected.mv_tau2)), 4),
+                "sd_livello_fantavoto": round(float(np.sqrt(projected.fv_tau2)), 4),
+                "sd_giornata_voto": round(std, 4),
+                "concentrazione_presenza": round(float(projected.presence_concentration), 4),
+            },
+        }
         daily_play, daily_vote, daily_std, daily_bonus = fixture_projection_arrays(p_play, mv, std, bonus, team, fixtures_by_team.get(player.Squadra, {}), teams_by_key, config.season_days)
         # Reading a single cell back out of a frame can hand over NaN where the
         # column holds None — a blank hierarchy means "no stated hierarchy", not
@@ -731,7 +768,7 @@ def build_projections(raw: Path = RAW, output: Path = PROCESSED, config: ModelCo
         # out. It is idempotent, and it keeps its validation on this path too.
         hierarchy = normalize_goalkeeper_hierarchy(starter_entry.iloc[0].gerarchia_portiere) if not starter_entry.empty else None
         venues = [fixtures_by_team.get(player.Squadra, {}).get(day, {}).get("venue") for day in range(1, config.season_days + 1)]
-        players.append({"id": int(player.Id), "nome": player.Nome, "ruolo": player.R, "ruoli_mantra": player.RM, "squadra": player.Squadra, "team_id": normalize(player.Squadra), "quotazioni": {"attuale": int(player["Qt.A"]), "iniziale": int(player["Qt.I"]), "differenza": int(player["Diff."])}, "fvm_original": round(float(player.FVM), 2), "fvm_scaled": round(float(player.FVM) * .75, 2), "guida_asta_fascia": _or_none(guide_entry.iloc[0].fascia) if not guide_entry.empty else None, "gerarchia_portiere": hierarchy, "disponibilita": _clean_record({"status": status.iloc[0] if not status.empty else "NON_CLASSIFICATO", "nota": starter_entry.iloc[0].note if not starter_entry.empty else None}), "storico": historical, "proiezione": {"p_gioca": round(p_play, 4), "voto_puro": round(mv, 3), "deviazione": round(std, 3), "bonus": round(bonus, 3), "fantavoto": round(mv + bonus, 3), "fonte_rate": "prior_fvm" if rates_imputed else "storico"}, "event_rates": event_rates, "p_gioca_per_giornata": [round(value, 4) for value in daily_play], "voto_puro_mean_per_giornata": [round(value, 3) for value in daily_vote], "voto_puro_std_per_giornata": [round(value, 3) for value in daily_std], "bonus_atteso_per_giornata": [round(value, 3) for value in daily_bonus], "venue_per_giornata": venues})
+        players.append({"id": int(player.Id), "nome": player.Nome, "ruolo": player.R, "ruoli_mantra": player.RM, "squadra": player.Squadra, "team_id": normalize(player.Squadra), "quotazioni": {"attuale": int(player["Qt.A"]), "iniziale": int(player["Qt.I"]), "differenza": int(player["Diff."])}, "fvm_original": round(float(player.FVM), 2), "fvm_scaled": round(float(player.FVM) * .75, 2), "guida_asta_fascia": _or_none(guide_entry.iloc[0].fascia) if not guide_entry.empty else None, "gerarchia_portiere": hierarchy, "disponibilita": _clean_record({"status": status.iloc[0] if not status.empty else "NON_CLASSIFICATO", "nota": starter_entry.iloc[0].note if not starter_entry.empty else None}), "storico": historical, "proiezione": {"p_gioca": round(p_play, 4), "voto_puro": round(mv, 3), "deviazione": round(std, 3), "bonus": round(bonus, 3), "fantavoto": round(mv + bonus, 3), "fonte_rate": source, **projection_extra}, "event_rates": event_rates, "p_gioca_per_giornata": [round(value, 4) for value in daily_play], "voto_puro_mean_per_giornata": [round(value, 3) for value in daily_vote], "voto_puro_std_per_giornata": [round(value, 3) for value in daily_std], "bonus_atteso_per_giornata": [round(value, 3) for value in daily_bonus], "venue_per_giornata": venues})
     # Browser JSON parsing rejects Python's non-standard NaN spelling in blank score columns.
     calendar_records = calendar.astype(object).where(pd.notna(calendar), None).to_dict(orient="records")
     for match in calendar_records:
@@ -765,7 +802,7 @@ def build_projections(raw: Path = RAW, output: Path = PROCESSED, config: ModelCo
     league_days = [day - 1 for day in current_matchdays] if current_matchdays else list(range(config.season_days))
     market_curve = annotate_surplus(players, league, config, league_days)
     _reject_non_finite(players, "players")
-    payload = {"schema_version": "1.0", "model_version": "1.6", "players": players, "teams": team_records, "set_pieces": set_piece_records, "league_rules": league_rules, "calendario_serie_a": calendar_records, "calendario_lega": league_calendar, "meta": {"generato_il": datetime.now(timezone.utc).isoformat(), "versione_modello": "1.6", "profile": profile_meta, "horizons": horizons, "curva_mercato": market_curve, "assunzioni": "75 minuti per voto; disponibilita da status e storico; gerarchia portieri esplicita; malus portieri incluso; lineup auto nel simulatore"}}
+    payload = {"schema_version": "1.0", "model_version": "2.0" if engine_projection is not None else "1.6", "players": players, "teams": team_records, "set_pieces": set_piece_records, "league_rules": league_rules, "calendario_serie_a": calendar_records, "calendario_lega": league_calendar, "meta": {"generato_il": datetime.now(timezone.utc).isoformat(), "versione_modello": "2.0" if engine_projection is not None else "1.6", "profile": profile_meta, "horizons": horizons, "curva_mercato": market_curve, "assunzioni": "75 minuti per voto; disponibilita da status e storico; gerarchia portieri esplicita; malus portieri incluso; lineup auto nel simulatore"}}
     output.mkdir(parents=True, exist_ok=True)
     temporary_path: Path | None = None
     try:

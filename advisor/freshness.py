@@ -33,7 +33,39 @@ def source_fingerprints(profile: Any, raw: Path) -> list[dict[str, Any]]:
                 digest = hashlib.sha256(path.read_bytes()).hexdigest()
                 item.update({"exists": True, "size_bytes": stat.st_size, "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(), "sha256": digest})
             result.append(item)
+    in_season = _in_season_fingerprint(profile, raw)
+    if in_season:
+        result.append(in_season)
     return result
+
+
+def _in_season_fingerprint(profile: Any, raw: Path) -> dict[str, Any] | None:
+    """One entry for the matchdays of the season in progress, so a new one makes the dataset stale.
+
+    The files live next to the player list (see advisor.inseason). The entry
+    always exists, with the digest of whatever is there, empty included: a
+    missing entry would read as a missing required source.
+    """
+    player_list = next((source for source in getattr(profile, "current_sources", ()) if source.name == "player_list"), None)
+    season = getattr(getattr(profile, "season", None), "season", None)
+    if player_list is None or not season:
+        return None
+    declared = Path(player_list.path)
+    candidates = [declared] if declared.is_absolute() else [raw / declared, declared, Path.cwd() / declared, Path(__file__).resolve().parents[1] / declared]
+    listone = next((candidate for candidate in candidates if candidate.is_file()), None)
+    if listone is None:
+        return None
+    from .inseason import season_stats_path, votes_dir
+    files = sorted(votes_dir(listone.parent, season).glob("giornata_*.csv"))
+    stats = season_stats_path(listone.parent, season)
+    if stats.is_file():
+        files.append(stats)
+    digest = hashlib.sha256()
+    for path in files:
+        digest.update(path.name.encode("utf-8"))
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return {"group": "in_season", "name": "giornate_giocate", "path": str(votes_dir(Path("data/raw"), season)),
+            "exists": True, "files": len(files), "sha256": digest.hexdigest()}
 
 
 def dataset_configuration_hash(profile: Any) -> str:

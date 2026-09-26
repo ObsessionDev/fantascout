@@ -392,6 +392,7 @@ def _predict_frame(engine: FittedEngine, frame: pd.DataFrame) -> pd.DataFrame:
     frame = frame.reset_index(drop=True)
     out = pd.DataFrame(index=frame.index)
     out["R"] = frame.R
+    out["Squadra"] = frame.Squadra
     out["new"] = frame.new
     out["p_play"] = frame.h_pres
     out["mv"] = frame.h_mv
