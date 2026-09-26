@@ -209,6 +209,33 @@ himself. Until then, availability reaches `advisor.lineup` as CLI flags built
 from whatever Mattia (or Mike, told by Mattia) read that day — no scraping, no
 stored credentials, no site-specific parser.
 
+## Projection Engine (fork)
+
+Projections come from `advisor.engine`: every historical season in
+`data/raw`, shrunk towards the role mean, then per-role models learned on the
+seasons before (opening price, club strength, last season's presence), which
+also give players with no history a real projection. It is checked season by
+season with no information from the future:
+
+```bash
+.venv/bin/python -m advisor.backtest            # before/after on the test seasons
+.venv/bin/python -m advisor.backtest --passi    # one change at a time
+```
+
+During the season every matchday played updates the projections. Drop a
+season-to-date `data/raw/statistiche_<season>.xlsx`, or import matchday votes,
+then regenerate:
+
+```bash
+.venv/bin/python -m advisor.aggiorna --profile config/profiles/lega-2026-27.json \
+  --importa voti_giornata_5.csv --giornata 5
+```
+
+The generation from the dashboard picks the same files up, and the dashboard
+marks the dataset stale when a new matchday lands. Formats and candidate
+sources, with their terms of use: `DATA_SOURCES.md`. Design and measurements:
+`docs/MOTORE.md`.
+
 ## Verification
 
 ```bash

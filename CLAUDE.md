@@ -11,7 +11,8 @@ advisor per asta Fantacalcio Classic. `origin` è il fork
 Le decisioni che hanno portato qui sono in `docs/DECISIONI.md`; i requisiti
 aggiuntivi rispetto a upstream sono in `docs/REQUISITI.md`; il progetto del
 ricalcolo in asta e le alternative misurate e scartate sono in
-`docs/ARCHITETTURA_ASTA.md`; dove va lo strumento dopo l'asta — formazione di
+`docs/ARCHITETTURA_ASTA.md`; il motore di previsione e la sua verifica in
+`docs/MOTORE.md`; dove va lo strumento dopo l'asta — formazione di
 giornata, scambi, prestiti, asta di riparazione — è in `docs/VISIONE.md`.
 
 ## Forma del progetto
@@ -82,6 +83,20 @@ L'obiettivo del solver è **massimizzare i fantapunti dato il budget**: i
 crediti non spesi valgono zero. Il target è un vincolo minimo da verificare,
 mai una condizione di arresto — l'unica eccezione è `--curve`, la cui domanda
 è appunto quanto costa un punto.
+
+Motore di previsione (`docs/MOTORE.md`): si verifica stagione per stagione e
+ogni cambiamento al modello si tiene solo se migliora la misura:
+
+```bash
+.venv/bin/python -m advisor.backtest --passi      # verifica, un passo alla volta
+.venv/bin/python -m advisor.aggiorna --profile config/profiles/lega-2026-27.json \
+  --importa <voti>.csv --giornata N               # una giornata nel modello
+```
+
+Il motore legge tutte le stagioni storiche di `data/raw`; dei listoni storici
+usa solo `Qt.I` (sono di fine stagione: `Qt.A` e `FVM` conterrebbero il
+risultato). I voti per giornata vanno in `data/updates/voti/<stagione>/` (in
+`.gitignore`): nessuna fonte si legge in automatico.
 
 In asta il client non esegue il solver: chiama due rotte stateless del server,
 `POST /api/auction/plan` (~1.1 s) e `POST /api/auction/bid` (~1.3 s), passando

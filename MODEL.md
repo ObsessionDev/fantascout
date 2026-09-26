@@ -7,31 +7,70 @@ that season.
 
 ## Player projections
 
-- Historical observations are weighted newest to oldest: 60%, 30%, 10%.
-- A player marked `TITOLARE`, `BALLOTTAGGIO`, or `RISERVA` has a current
-  availability prior of 85%, 55%, or 15%. When historical availability exists,
-  the final probability is 65% current prior and 35% history.
-- Event rates are normalized to a documented 75-minute rated appearance.
-- A player with no rated appearance in any loaded season does not take zero for
-  his event rates. Zero is not a neutral value: the expected bonus is negative
-  for goalkeepers, who concede goals, and positive for midfielders and forwards,
-  so a missing history would inflate one end of the listing and deflate the
-  other. Each rate is instead regressed on `log(1 + FVM)` across the players of
-  the same role who do have history, and the fit is evaluated at the player's
-  own FVM. Coefficients are fitted at run time from the loaded seasons and are
-  never hard-coded; a role with fewer than `rate_prior_min_samples` observations
-  or no spread collapses to a flat prior at the role median, and imputed rates
-  are clipped at zero.
-  The market value is the only signal available for these players, so their
-  projection is by construction consistent with their price: the imputation
-  removes a directional bias, it does not manufacture an edge. Such players
-  carry `proiezione.fonte_rate = "prior_fvm"` and must be shown as low
-  confidence. Set `ModelConfig.impute_missing_history = False` to restore the
-  previous zero-rate behaviour.
-- Primary penalty takers receive a 0.12 expected-goal-per-90 uplift.
-- European competitions apply a rotation discount to outfield availability.
-- Fixture projections vary by opponent strength and home/away status while
-  preserving the player-level seasonal mean.
+The projection engine is `advisor.engine`; `docs/MOTORE.md` gives the
+measurements behind every choice below. It predicts, per player and matchday,
+the probability of a vote, the mean pure vote and the expected count of each
+scoring event per rated appearance.
+
+- **Inputs known before a season starts.** Season totals of every earlier
+  season in `data/raw`, and the current list with its opening price `Qt.I`.
+  The historical lists were saved at the end of their season, so `Qt.A` and
+  `FVM` are never used: they would carry the outcome.
+- **Shrunk history.** Past seasons are pooled with a discount of 0.45 per
+  season of age, over at most six seasons, and pulled towards the role mean
+  with the weight of 12 rated appearances (vote), 20 (events) or one season
+  (presence). This is the empirical-Bayes posterior mean of a normal,
+  gamma-Poisson and beta-binomial model. Event rates are per rated
+  appearance, the unit in which the fantasy vote counts them.
+- **Calibration, learned.** Per role, a logistic model (presence, on matchdays
+  with a vote out of 38), weighted least squares (vote, weighted by
+  appearances) and a Poisson model with exposure (each event) take the shrunk
+  history, the amount of history, a no-history flag, `log(Qt.I)` and its
+  interaction with the flag, the club's goals scored and conceded per
+  matchday last season, a promoted-club flag, and last season's presence on
+  its own. Ridge penalty 10 on standardised features. Coefficients are fitted
+  at run time on every season that precedes the target, never hard-coded.
+- **Cold start.** A player with no rated history gets his projection from the
+  same models, which learned from past newcomers what a given opening price in
+  a given club leads to. A promoted club stands at the mean of past promoted
+  clubs in their first season. Such players carry `fonte_rate =
+  "avvio_freddo"` and `mercato.informativo = false`: their numbers follow the
+  price by construction.
+- **Uncertainty, measured.** From the residuals, per role, the method of
+  moments fits `E[r^2] = tau2 + sigma2 / n`: `tau2` is how far a true season
+  level strays from the prediction, `sigma2` the noise of one matchday. The
+  presence concentration comes from the beta-binomial overdispersion. They are
+  exported under `proiezione.incertezza`; `sd_giornata_voto` is also the
+  matchday vote deviation. On unseen seasons the 80% interval of the season
+  fantasy mean covers 84%, the 50% interval 54%, and the 80% interval of
+  appearances 80%.
+- **The season in progress** (`advisor.inseason`). The pre-season projection is
+  the prior and the matchdays played are data, combined conjugately: presence
+  `(p·kappa + votes) / (kappa + matchdays)`, vote
+  `(k·mean + votes·observed) / (k + votes)` with `k = sigma2 / tau2`, events
+  `(alpha + count) / (beta + votes)` with the gamma prior of the measured
+  variance. The trials of a player are the matchdays his club played; absence
+  from the data is a matchday without a vote. Recency weighting within the
+  season (`half_life`) exists and is off until matchday data can measure it.
+- **Scoring.** The bonus is the event rates priced by the profile, penalties
+  saved and missed included. A clean sheet, when the profile scores it, has
+  probability `exp(-goals conceded per appearance)`: modelled, not measurable
+  from season totals.
+- **Kept from before, not measurable** (no history exists): a player marked
+  `TITOLARE`, `BALLOTTAGGIO` or `RISERVA` has a current availability prior of
+  85%, 55% or 15%, blended 65/35 with the projection; the primary penalty
+  taker gets 0.12 extra goals per appearance; European clubs take a rotation
+  discount on outfield presence; fixture projections vary by opponent and
+  venue around the player's seasonal mean.
+- **Measured and rejected:** a changed-club flag, a price by history
+  interaction, and gradient-boosted trees on the same features (worse on every
+  metric). The previous fixed 60/30/10 weights and the per-90 normalisation
+  of rates, which inflated bonus and malus by 20%, are gone.
+- **Fallback.** With fewer than three historical seasons that have both a list
+  and statistics, or with `ModelConfig.engine = "legacy"`, the pipeline keeps
+  the previous projection: fixed weights over the declared history, rates
+  normalised to 75 minutes, and the FVM regression for players without
+  history.
 
 ## Auction values
 
@@ -97,6 +136,13 @@ that season.
 ## Simulation
 
 - Monte Carlo uses a reproducible seed and 1,000 iterations by default.
+- Each iteration draws once per player a season level for the vote, one for
+  the bonus and a share of matchdays played, from `proiezione.incertezza`, so
+  good and bad seasons of a player hang together as they do in reality. The
+  lineup is picked knowing that share. Players without the measured spread
+  draw nothing and keep the previous behaviour.
+- Penalties saved and missed, and the clean sheet, enter the simulated fantasy
+  vote with the profile's values.
 - Bench composition and the maximum number of substitutions come from
   `bench_switch` in the active profile.
 - `bench_switch.composition` selects how the bench is formed. `by_role`, the
