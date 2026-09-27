@@ -114,7 +114,10 @@ FIXED_SOURCE_SUFFIXES = {
         "stats_2023_24": ".xlsx",
     },
 }
-VITE_ORIGIN = re.compile(r"https?://(?:localhost|127\.0\.0\.1)(?::\d+)?\Z")
+# Local Vite, or the same GUI opened through Tailscale (`tailscale serve`, https only).
+VITE_ORIGIN = re.compile(
+    r"(?:https?://(?:localhost|127\.0\.0\.1)|https://[a-z0-9-]+\.[a-z0-9-]+\.ts\.net)(?::\d+)?\Z"
+)
 ProfileLoader = Callable[[dict[str, Any]], Any]
 SimulationRunner = Callable[[Any, Path, int, int, dict[str, list[int]] | None], dict[str, Any]]
 

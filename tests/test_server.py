@@ -238,6 +238,14 @@ class LocalApiServerTests(unittest.TestCase):
         self.assertEqual(payload["profile_id"], "inline-team")
         self.assertEqual(self.calls[1].profile_id, "inline-team")
 
+    def test_cors_accepts_tailscale_https_origin_only(self):
+        tailnet = "https://mac.tail1234.ts.net:8442"
+        response, _ = self.request("OPTIONS", "/api/generate", headers={"Origin": tailnet})
+        self.assertEqual(response.getheader("Access-Control-Allow-Origin"), tailnet)
+        for origin in ("http://mac.tail1234.ts.net:8442", "https://mac.ts.net.example.com"):
+            response, _ = self.request("OPTIONS", "/api/generate", headers={"Origin": origin})
+            self.assertIsNone(response.getheader("Access-Control-Allow-Origin"))
+
     def test_options_and_invalid_generation_profile_are_structured(self):
         response, payload = self.request("OPTIONS", "/api/generate", headers={"Origin": "http://127.0.0.1:5173"})
         self.assertEqual(response.status, 204)
