@@ -175,7 +175,11 @@ class LocalApiHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = self._path()
-        if path == "/api/profiles":
+        if path == "/api/salute":
+            # Contratto dei moduli dell'ecosistema Mike: il control center lo chiede alla GUI
+            # (8442), che lo inoltra qui. Se l'API e' ferma risponde la GUI, dicendolo.
+            self._send_json(HTTPStatus.OK, {"ok": True, "modulo": "fantascout"})
+        elif path == "/api/profiles":
             self._profile_index()
         elif path == "/api/default-profile":
             self._default_profile()
