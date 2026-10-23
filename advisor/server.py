@@ -195,6 +195,8 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.NOT_FOUND, "not_found", "The requested endpoint does not exist.")
 
     def do_PUT(self) -> None:
+        if not self._write_allowed():
+            return
         path = self._path()
         if path.startswith("/api/updates/player-list/candidate/"):
             self._put_player_list_candidate(path.removeprefix("/api/updates/player-list/candidate/"))
@@ -208,6 +210,8 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.NOT_FOUND, "not_found", "The requested endpoint does not exist.")
 
     def do_DELETE(self) -> None:
+        if not self._write_allowed():
+            return
         path = self._path()
         if path.startswith("/api/profiles/"):
             self._delete_profile(path.removeprefix("/api/profiles/"))
@@ -215,6 +219,8 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.NOT_FOUND, "not_found", "The requested endpoint does not exist.")
 
     def do_POST(self) -> None:
+        if not self._write_allowed():
+            return
         if self._path() == "/api/updates/player-list/check":
             self._check_player_list_updates()
             return
@@ -1415,6 +1421,22 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.BAD_REQUEST, "invalid_json", "Request body must be a JSON object.")
             return None
         return value
+
+    def _write_allowed(self) -> bool:
+        """Writes come only from our own GUI. A browser attaches `Origin` to every write, so a
+        page on another site (a "simple" POST skips CORS preflight) is refused here, not just
+        left without CORS headers. No `Origin` = not a browser (curl, tests): allowed."""
+        origin = self.headers.get("Origin")
+        if origin is None:
+            return True
+        host = (self.headers.get("Host") or "").lower()
+        parsed = urlparse(origin)
+        same_origin = bool(host) and parsed.netloc.lower() == host
+        same_host_gui = bool(VITE_ORIGIN.fullmatch(origin)) and (parsed.hostname or "") == host.rsplit(":", 1)[0].strip("[]")
+        if same_origin or same_host_gui:
+            return True
+        self._error(HTTPStatus.FORBIDDEN, "forbidden_origin", "Writes are accepted only from the GUI served by this app.")
+        return False
 
     def _path(self) -> str:
         return unquote(urlparse(self.path).path)

@@ -246,6 +246,25 @@ class LocalApiServerTests(unittest.TestCase):
             response, _ = self.request("OPTIONS", "/api/generate", headers={"Origin": origin})
             self.assertIsNone(response.getheader("Access-Control-Allow-Origin"))
 
+    def test_writes_refuse_a_foreign_origin_but_accept_the_gui_and_no_origin(self):
+        host, port = self.server.server_address
+        body = json.dumps({**self.profile, "profile_id": "origin-check"}).encode("utf-8")
+        json_type = {"Content-Type": "application/json"}
+        for origin in ("https://evil.example.com", "http://127.0.0.1.evil.com", "https://other.tail1234.ts.net:8442", "null"):
+            for method, path in (("PUT", "/api/profiles/origin-check"), ("POST", "/api/generate"), ("DELETE", "/api/profiles/origin-check")):
+                response, payload = self.request(method, path, body, {**json_type, "Origin": origin})
+                self.assertEqual(response.status, 403, (origin, method))
+                self.assertEqual(payload["error"]["code"], "forbidden_origin")
+        # the same host the API was reached on (local GUI, or the tailnet name) and curl-like calls pass
+        response, _ = self.request("PUT", "/api/profiles/origin-check", body, {**json_type, "Origin": f"http://{host}:8442"})
+        self.assertEqual(response.status, 200)
+        response, _ = self.request("PUT", "/api/profiles/origin-check", body, {**json_type, "Origin": f"http://{host}:{port}"})
+        self.assertEqual(response.status, 200)
+        response, _ = self.request("PUT", "/api/profiles/origin-check", body, json_type)
+        self.assertEqual(response.status, 200)
+        response, _ = self.request("GET", "/api/profiles", None, {"Origin": "https://evil.example.com"})
+        self.assertEqual(response.status, 200)
+
     def test_options_and_invalid_generation_profile_are_structured(self):
         response, payload = self.request("OPTIONS", "/api/generate", headers={"Origin": "http://127.0.0.1:5173"})
         self.assertEqual(response.status, 204)

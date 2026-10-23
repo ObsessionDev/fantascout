@@ -34,7 +34,10 @@ avvia_web() {
   if vivo web; then return 0; fi
   [ -x "$QUI/web/node_modules/.bin/vite" ] || { echo "fantascout: missing web/node_modules (see README: cd web && npm install)"; return 1; }
   # vite directly, not `npm run dev`: npm would leave vite running after a stop.
-  (cd "$QUI/web" && VITE_LOCAL_API_BASE="http://127.0.0.1:$API_PORT" exec nohup node_modules/.bin/vite \
+  # No VITE_LOCAL_API_BASE: the client then calls the API on the host the page was opened
+  # from (127.0.0.1 locally, the .ts.net name through Tailscale); a fixed 127.0.0.1 would
+  # point a phone at itself.
+  (cd "$QUI/web" && exec nohup node_modules/.bin/vite \
     --host 127.0.0.1 --port "$WEB_PORT" --strictPort >>"$STATO/web.log" 2>&1 </dev/null) &
   echo $! > "$STATO/web.pid"
 }
