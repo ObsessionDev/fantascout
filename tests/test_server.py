@@ -255,6 +255,11 @@ class LocalApiServerTests(unittest.TestCase):
                 response, payload = self.request(method, path, body, {**json_type, "Origin": origin})
                 self.assertEqual(response.status, 403, (origin, method))
                 self.assertEqual(payload["error"]["code"], "forbidden_origin")
+        # DNS rebinding: a hostile name pointed at 127.0.0.1 sends a matching Origin and Host
+        response, _ = self.request("PUT", "/api/profiles/origin-check", body, {**json_type, "Origin": "http://evil.example.com:8441", "Host": "evil.example.com:8441"})
+        self.assertEqual(response.status, 403)
+        response, _ = self.request("PUT", "/api/profiles/origin-check", body, {**json_type, "Origin": "https://mac.tail1234.ts.net:8442", "Host": "mac.tail1234.ts.net:8441"})
+        self.assertEqual(response.status, 200)
         # the same host the API was reached on (local GUI, or the tailnet name) and curl-like calls pass
         response, _ = self.request("PUT", "/api/profiles/origin-check", body, {**json_type, "Origin": f"http://{host}:8442"})
         self.assertEqual(response.status, 200)
