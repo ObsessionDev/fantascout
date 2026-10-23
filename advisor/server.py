@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import tempfile
@@ -118,6 +119,7 @@ FIXED_SOURCE_SUFFIXES = {
 VITE_ORIGIN = re.compile(
     r"(?:https?://(?:localhost|127\.0\.0\.1)|https://[a-z0-9-]+\.[a-z0-9-]+\.ts\.net)(?::\d+)?\Z"
 )
+ALLOWED_HOSTS = {"localhost", "127.0.0.1", "::1", *filter(None, os.environ.get("FANTASCOUT_ALLOWED_HOSTS", "").lower().split(","))}
 ProfileLoader = Callable[[dict[str, Any]], Any]
 SimulationRunner = Callable[[Any, Path, int, int, dict[str, list[int]] | None], dict[str, Any]]
 
@@ -195,6 +197,8 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.NOT_FOUND, "not_found", "The requested endpoint does not exist.")
 
     def do_PUT(self) -> None:
+        if not self._write_allowed():
+            return
         path = self._path()
         if path.startswith("/api/updates/player-list/candidate/"):
             self._put_player_list_candidate(path.removeprefix("/api/updates/player-list/candidate/"))
@@ -208,6 +212,8 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.NOT_FOUND, "not_found", "The requested endpoint does not exist.")
 
     def do_DELETE(self) -> None:
+        if not self._write_allowed():
+            return
         path = self._path()
         if path.startswith("/api/profiles/"):
             self._delete_profile(path.removeprefix("/api/profiles/"))
@@ -215,6 +221,8 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.NOT_FOUND, "not_found", "The requested endpoint does not exist.")
 
     def do_POST(self) -> None:
+        if not self._write_allowed():
+            return
         if self._path() == "/api/updates/player-list/check":
             self._check_player_list_updates()
             return
@@ -1415,6 +1423,26 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.BAD_REQUEST, "invalid_json", "Request body must be a JSON object.")
             return None
         return value
+
+    def _write_allowed(self) -> bool:
+        """Writes come only from our own GUI. A browser attaches `Origin` to every write, so a
+        page on another site (a "simple" POST skips CORS preflight) is refused here, not just
+        left without CORS headers. The Host must also be one of ours (localhost, 127.0.0.1,
+        *.ts.net, or FANTASCOUT_ALLOWED_HOSTS): a hostile name re-pointed at 127.0.0.1
+        (DNS rebinding) sends a matching Origin and Host, so comparing the two is not enough.
+        No `Origin` = not a browser (curl, tests): allowed."""
+        origin = self.headers.get("Origin")
+        if origin is None:
+            return True
+        host = (self.headers.get("Host") or "").lower()
+        hostname = host.rsplit(":", 1)[0].strip("[]") if not host.endswith("]") else host.strip("[]")
+        parsed = urlparse(origin)
+        host_ok = hostname in ALLOWED_HOSTS or hostname.endswith(".ts.net")
+        origin_ok = bool(VITE_ORIGIN.fullmatch(origin)) or parsed.netloc.lower() == host
+        if host_ok and origin_ok and (parsed.hostname or "") == hostname:
+            return True
+        self._error(HTTPStatus.FORBIDDEN, "forbidden_origin", "Writes are accepted only from the GUI served by this app.")
+        return False
 
     def _path(self) -> str:
         return unquote(urlparse(self.path).path)
